@@ -157,6 +157,7 @@
     }
     renderStatusPills(s);
     renderHealthTable(s);
+    renderTwitchStatus(s);
     $("ai-panel").hidden = !s.ai.enabled;
     $("ai-run").hidden = !s.ai.available;
     return s;
@@ -199,7 +200,7 @@
 
   function renderHealthTable(s) {
     const names = { ccu: "CCU", reviews_recent: "Recenzje - nowe", reviews_updated: "Recenzje - edytowane",
-      review_summary: "Podsumowanie recenzji", ai: "Analiza AI" };
+      review_summary: "Podsumowanie recenzji", ai: "Analiza AI", twitch: "Twitch" };
     const t = $("health-table");
     t.replaceChildren(el("tr", {}, el("th", { text: "Źródło" }), el("th", { text: "Ostatni sukces" }),
       el("th", { text: "Ostatni błąd" })));
@@ -404,9 +405,104 @@
     renderChart("pct", "chart-pct", opts, [d.t, d.pct, d.total], "Brak migawek podsumowania w tym zakresie");
   }
 
+  // ---------------------------------------------------------------- Twitch
+  function renderTwitchStatus(s) {
+    const tw = s.twitch, pill = $("st-twitch");
+    $("tw-off").hidden = tw.available || s.demo;
+    const cat = tw.category_id ? `${tw.category_name} (ID ${tw.category_id})` : `„${tw.category_query}” (jeszcze nie znaleziona)`;
+    $("tw-category").textContent = `kategoria: ${cat}`;
+    pill.hidden = !tw.available;
+    if (!tw.available) return;
+    const st = sourceState(s.sources.twitch, tw.interval * 3);
+    const h = s.sources.twitch;
+    if (h && h.last_error && h.last_error.startsWith("[unavailable]") && st !== "ok") {
+      pill.className = "pill warn"; pill.textContent = "Twitch: brak kategorii";
+    } else if (st === "none") { pill.className = "pill"; pill.textContent = "Twitch: brak odczytów"; }
+    else { pill.className = `pill ${st}`; pill.textContent = st === "ok" ? "Twitch: OK" : "Twitch: problem"; }
+    if (h && h.last_error) pill.title = h.last_error;
+  }
+
+  function streamName(r) { return r.user_name || r.user_login; }
+
+  async function loadTwitch() {
+    const o = await api(`/api/twitch/overview?${rangeQuery()}`);
+    const cur = o.current;
+    if (cur && !o.stale) {
+      $("tw-viewers").textContent = fmtN(cur.total_viewers);
+      $("tw-channels").textContent = fmtN(cur.live_channels);
+      $("tw-viewers-meta").textContent = `migawka ${fmtTime(cur.observed_at, false)} (${ago(cur.observed_at)})`;
+      $("tw-channels-meta").textContent = "w kategorii gry";
+    } else {
+      $("tw-viewers").replaceChildren(el("span", { class: "unavail", text: cur ? "nieaktualne" : "brak danych" }));
+      $("tw-channels").replaceChildren(el("span", { class: "unavail", text: "–" }));
+      const lr = o.last_run;
+      $("tw-viewers-meta").textContent = cur ? `ostatnia migawka ${ago(cur.observed_at)}` :
+        lr ? `ostatnia próba: ${lr.status}${lr.error ? " - " + lr.error : ""}` : "jeszcze nie odpytano";
+      $("tw-channels-meta").textContent = "";
+    }
+    if (o.peak_viewers) {
+      $("tw-peak").textContent = fmtN(o.peak_viewers.total_viewers);
+      $("tw-peak-meta").textContent = `${fmtTime(o.peak_viewers.observed_at)} · maks. kanałów: ${fmtN(o.peak_channels.live_channels)}`;
+    } else { $("tw-peak").textContent = "–"; }
+    const r = o.range;
+    $("tw-hours").textContent = r.samples ? fmtN(r.viewer_hours) : "–";
+    $("tw-hours-meta").textContent = r.samples ? `szacunek z ${fmtN(r.samples)} migawek · śr. ${fmtN(r.mean_viewers)} widzów` : "brak migawek w zakresie";
+    $("tw-unique").textContent = r.samples ? fmtN(r.unique_channels) : "–";
+    $("tw-unique-meta").textContent = r.samples ? `${fmtN(r.unique_streams)} transmisji · szczyt ${fmtN(r.peak_viewers)} widzów` : "";
+
+    const ul = $("tw-live");
+    ul.replaceChildren();
+    if (!o.live.length) ul.append(el("li", { class: "muted", text: cur && !o.stale ? "Nikt nie nadaje teraz w tej kategorii." : "Brak aktualnej migawki." }));
+    for (const s of o.live) {
+      ul.append(el("li", {},
+        el("span", { class: "v", text: fmtN(s.viewers) }),
+        el("span", {},
+          el("a", { href: s.url, target: "_blank", rel: "noopener noreferrer", text: streamName(s) }),
+          el("span", { class: "muted", text: ` · ${s.language || "?"}${s.started_at ? ` · od ${fmtTime(s.started_at, false)}` : ""}` }),
+          el("span", { class: "title", text: s.title || "" }))));
+    }
+
+    const t = $("tw-top");
+    t.replaceChildren(el("tr", {}, el("th", { text: "Kanał / tytuł" }), el("th", { text: "Szczyt" }),
+      el("th", { text: "Średnio" }), el("th", { text: "Widziana" }), el("th", { text: "Godz. ogl." })));
+    if (!o.top_streams.length) t.append(el("tr", {}, el("td", { colspan: 5, class: "muted", text: "Brak transmisji w tym zakresie." })));
+    for (const s of o.top_streams) {
+      t.append(el("tr", {},
+        el("td", {}, el("a", { href: s.url, target: "_blank", rel: "noopener noreferrer", text: streamName(s) }),
+          el("span", { class: "muted", text: ` · ${s.language || "?"}` }), el("span", { class: "title", text: s.title || "" })),
+        el("td", { class: "num", text: fmtN(s.peak) }),
+        el("td", { class: "num", text: fmtN(s.mean) }),
+        el("td", { class: "num", text: `${fmtTime(s.first_at, false)}–${fmtTime(s.last_at, false)}` }),
+        el("td", { class: "num", title: "szacunek z migawek", text: fmtN(s.viewer_hours) })));
+    }
+  }
+
+  async function loadTwitchChart() {
+    const d = await api(`/api/twitch/series?${rangeQuery()}`);
+    $("tw-res").textContent = `Rozdzielczość: ${resLabel[d.resolution] || d.resolution}.`;
+    const c = $("chart-twitch");
+    const r = currentRange();
+    const fmt = (u, v) => (v == null ? "–" : nf.format(Math.round(v)));
+    const series = [
+      { label: d.resolution === "raw" ? "Widzowie" : "Widzowie (średnia)", stroke: css("--twitch"), width: 2,
+        fill: css("--twitch") + "22", spanGaps: false, value: fmt },
+      { label: d.resolution === "raw" ? "Kanały" : "Kanały (średnia)", scale: "ch", stroke: css("--muted"), width: 1,
+        dash: [4, 3], spanGaps: false, value: fmt },
+    ];
+    const data = [d.t, d.viewers, d.channels];
+    if (d.max) {
+      series.push({ label: "Widzowie (maks.)", stroke: css("--info"), width: 1, dash: [2, 2], spanGaps: false, value: fmt });
+      data.push(d.max);
+    }
+    const opts = baseOpts(c, series, { scales: { x: { time: true, min: r.from, max: r.to },
+      ch: { range: (u, mn, mx) => [0, Math.max(1, mx)] } } });
+    opts.axes.push({ scale: "ch", side: 1, stroke: css("--muted"), grid: { show: false }, size: 50 });
+    renderChart("twitch", "chart-twitch", opts, data, "Brak migawek Twitch w tym zakresie");
+  }
+
   async function refreshSeries() {
     updateRangeLabel();
-    await Promise.allSettled([loadAnnotations(), loadCcuChart(), loadReviewChart(), loadPctChart()]);
+    await Promise.allSettled([loadAnnotations(), loadCcuChart(), loadReviewChart(), loadPctChart(), loadTwitchChart(), loadTwitch()]);
     if ($("f-range").checked) loadFeed(true);
   }
 
@@ -591,6 +687,8 @@
       const g = state.status.game;
       $("set-launch").value = epochToZoned(g.launch_at);
       $("set-appid").value = g.app_id; $("set-name").value = g.name;
+      $("set-twitch").value = g.twitch_category || "";
+      $("set-twitch").placeholder = state.status.twitch.category_query;
       dlg.showModal();
     });
     $("set-cancel").addEventListener("click", () => dlg.close());
@@ -605,6 +703,8 @@
       if (appId !== g.app_id && !confirm(`Przełączyć monitoring na App ID ${appId}? Dane gry ${g.app_id} zostaną zachowane.`)) return;
       const body = { launch_at: zonedToEpoch($("set-launch").value) };
       if (appId !== g.app_id || $("set-name").value !== g.name) { body.app_id = appId; body.name = $("set-name").value; }
+      // The Twitch category belongs to the game; do not carry it over to a newly selected App ID.
+      if (appId === g.app_id) body.twitch_category = $("set-twitch").value.trim();
       try {
         await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
         dlg.close(); toast("Zapisano ustawienia");

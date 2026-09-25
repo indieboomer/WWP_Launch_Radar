@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime
 from typing import Any
 
 from .db import now, transaction
@@ -62,6 +63,21 @@ def active_game_id(conn: sqlite3.Connection) -> int | None:
 def mark_monitoring_started(conn: sqlite3.Connection, game_id: int, ts: int) -> None:
     conn.execute(
         "UPDATE games SET monitoring_started_at=? WHERE id=? AND monitoring_started_at IS NULL", (ts, game_id)
+    )
+
+
+def mark_twitch_started(conn: sqlite3.Connection, game_id: int, ts: int) -> None:
+    conn.execute(
+        "UPDATE games SET twitch_monitoring_started_at=? WHERE id=? AND twitch_monitoring_started_at IS NULL",
+        (ts, game_id),
+    )
+
+
+def set_twitch_category(conn: sqlite3.Connection, game_id: int, query: str | None, category_id: str | None,
+                        category_name: str | None) -> None:
+    conn.execute(
+        "UPDATE games SET twitch_category=?, twitch_category_id=?, twitch_category_name=? WHERE id=?",
+        (query, category_id, category_name, game_id),
     )
 
 
@@ -132,6 +148,56 @@ def insert_ccu(conn: sqlite3.Connection, game_id: int, observed_at: int, player_
         "INSERT OR IGNORE INTO ccu_observations(game_id, observed_at, player_count) VALUES (?,?,?)",
         (game_id, observed_at, player_count),
     )
+
+
+# -- Twitch --------------------------------------------------------------------------
+
+def parse_iso(value: Any) -> int | None:
+    if not value:
+        return None
+    try:
+        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def insert_twitch_snapshot(conn: sqlite3.Connection, game_id: int, observed_at: int, category_id: str,
+                           streams: list[dict], pages: int) -> int | None:
+    """Store one complete category snapshot and update per-stream stats. Call inside a transaction.
+
+    Returns None (and stores nothing) if a snapshot already exists for that second.
+    """
+    counts = [max(0, int(s.get("viewer_count") or 0)) for s in streams]
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO twitch_snapshots(game_id, observed_at, category_id, live_channels, total_viewers, pages) "
+        "VALUES (?,?,?,?,?,?)",
+        (game_id, observed_at, category_id, len({str(s["user_id"]) for s in streams}), sum(counts), pages),
+    )
+    if cur.rowcount == 0:
+        return None
+    snap_id = cur.lastrowid
+    for s, viewers in zip(streams, counts):
+        sid = str(s["id"])
+        conn.execute(
+            "INSERT INTO twitch_stream_observations(snapshot_id, game_id, stream_id, observed_at, viewer_count) "
+            "VALUES (?,?,?,?,?)",
+            (snap_id, game_id, sid, observed_at, viewers),
+        )
+        conn.execute(
+            "INSERT INTO twitch_streams(game_id, stream_id, user_id, user_login, user_name, category_id, title, language, "
+            "is_mature, tags, started_at, first_seen_at, last_seen_at, samples, viewer_sum, peak_viewers, peak_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?) "
+            "ON CONFLICT(game_id, stream_id) DO UPDATE SET user_login=excluded.user_login, user_name=excluded.user_name, "
+            "title=excluded.title, language=excluded.language, is_mature=excluded.is_mature, tags=excluded.tags, "
+            "last_seen_at=excluded.last_seen_at, samples=samples+1, viewer_sum=viewer_sum+excluded.viewer_sum, "
+            "peak_at=CASE WHEN excluded.peak_viewers > peak_viewers THEN excluded.peak_at ELSE peak_at END, "
+            "peak_viewers=MAX(peak_viewers, excluded.peak_viewers)",
+            (game_id, sid, str(s["user_id"]), str(s.get("user_login") or ""), s.get("user_name"), category_id,
+             s.get("title"), s.get("language"), _b(s.get("is_mature")),
+             json.dumps(s.get("tags") or [], ensure_ascii=False), parse_iso(s.get("started_at")),
+             observed_at, observed_at, viewers, viewers, observed_at),
+        )
+    return snap_id
 
 
 # -- reviews -------------------------------------------------------------------------

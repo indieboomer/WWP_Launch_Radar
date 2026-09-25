@@ -1,4 +1,4 @@
-"""Exports generated from stored data only (never re-fetched from Steam).
+"""Exports generated from stored data only (never re-fetched from Steam or Twitch).
 
 Date-filter semantics (half-open [from, to), UTC):
   ccu_raw              -> ccu_observations.observed_at
@@ -8,6 +8,10 @@ Date-filter semantics (half-open [from, to), UTC):
   review_summaries     -> review_summary_snapshots.observed_at
   review_aggregates    -> bucket_start
   annotations          -> annotations.event_at
+  twitch_snapshots     -> twitch_snapshots.observed_at
+  twitch_streams       -> observed lifetime overlaps the range (last_seen_at >= from AND first_seen_at < to)
+  twitch_stream_observations -> observed_at
+  twitch_aggregates    -> bucket_start
 The ZIP applies the same rules per dataset. The SQLite backup is always the complete database.
 """
 from __future__ import annotations
@@ -42,6 +46,17 @@ DATASETS = {
     "review_aggregates": {"format": "csv", "time_field": "bucket_start",
                           "desc": "Nowe recenzje pozytywne/negatywne wg czasu utworzenia oraz zmiany rekomendacji wg czasu edycji."},
     "annotations": {"format": "csv", "time_field": "event_at", "desc": "Ręczne adnotacje zdarzeń."},
+    "twitch_snapshots": {"format": "csv", "time_field": "observed_at",
+                         "desc": "Migawki kategorii Twitch: łączna liczba widzów i kanałów na żywo. Tylko kompletne, "
+                                 "udane odczyty - nieudane nie są zerami (patrz collection_runs, source=twitch)."},
+    "twitch_streams": {"format": "csv", "time_field": "first_seen_at..last_seen_at",
+                       "desc": "Transmisje Twitch widziane w kategorii: kanał, tytuł, język, szczyt i średnia widzów. "
+                               "Filtr: okres widoczności transmisji nakłada się na zakres."},
+    "twitch_stream_observations": {"format": "csv", "time_field": "observed_at",
+                                   "desc": "Liczba widzów każdej transmisji w każdej migawce."},
+    "twitch_aggregates": {"format": "csv", "time_field": "bucket_start",
+                          "desc": "Agregaty Twitch 5m/1h/1d: widzowie (min/maks./średnia), kanały, unikalne transmisje "
+                                  "i kanały, szacowane godziny oglądania, pokrycie."},
 }
 
 
@@ -224,6 +239,63 @@ def annotations(conn, game_id, start, end, tz):
     return cols, rows
 
 
+def twitch_snapshots(conn, game_id, start, end, tz):
+    args: list = [game_id]
+    q = _range("SELECT * FROM twitch_snapshots WHERE game_id=?", "observed_at", start, end, args)
+    cols = ["observed_at_utc", "observed_at_local", "category_id", "live_channels", "total_viewers", "pages"]
+    rows = [(iso(r["observed_at"]), local_iso(r["observed_at"], tz), r["category_id"], r["live_channels"],
+             r["total_viewers"], r["pages"]) for r in conn.execute(q + " ORDER BY observed_at", args)]
+    return cols, rows
+
+
+def twitch_streams(conn, game_id, start, end):
+    args: list = [game_id]
+    q = "SELECT * FROM twitch_streams WHERE game_id=?"
+    # A stream belongs to the range when its observed lifetime overlaps [start, end).
+    if start is not None:
+        q += " AND last_seen_at>=?"
+        args.append(start)
+    if end is not None:
+        q += " AND first_seen_at<?"
+        args.append(end)
+    cols = ["stream_id", "twitch_url", "user_id", "user_login", "user_name", "category_id", "title", "language",
+            "is_mature", "tags", "started_at_utc", "first_seen_at_utc", "last_seen_at_utc", "samples", "peak_viewers",
+            "peak_at_utc", "mean_viewers"]
+    rows = [(r["stream_id"], f"https://www.twitch.tv/{r['user_login']}", r["user_id"], r["user_login"], r["user_name"],
+             r["category_id"], r["title"], r["language"], _bool(r["is_mature"]), r["tags"], iso(r["started_at"]),
+             iso(r["first_seen_at"]), iso(r["last_seen_at"]), r["samples"], r["peak_viewers"], iso(r["peak_at"]),
+             round(r["viewer_sum"] / r["samples"], 2) if r["samples"] else None)
+            for r in conn.execute(q + " ORDER BY first_seen_at, stream_id", args)]
+    return cols, rows
+
+
+def twitch_stream_observations(conn, game_id, start, end):
+    args: list = [game_id]
+    q = _range("SELECT o.*, s.user_login FROM twitch_stream_observations o JOIN twitch_streams s "
+               "ON s.game_id=o.game_id AND s.stream_id=o.stream_id WHERE o.game_id=?", "o.observed_at", start, end, args)
+    cols = ["observed_at_utc", "snapshot_id", "stream_id", "user_login", "viewer_count"]
+    rows = [(iso(r["observed_at"]), r["snapshot_id"], r["stream_id"], r["user_login"], r["viewer_count"])
+            for r in conn.execute(q + " ORDER BY o.observed_at, o.viewer_count DESC", args)]
+    return cols, rows
+
+
+def twitch_aggregates(conn, game_id, start, end, tz, bucket: str | None = None):
+    args: list = [game_id]
+    q = "SELECT * FROM twitch_aggregates WHERE game_id=?"
+    if bucket:
+        q += " AND bucket=?"
+        args.append(bucket)
+    q = _range(q, "bucket_start", start, end, args)
+    cols = ["bucket", "bucket_start_utc", "bucket_end_utc", "bucket_start_local", "samples", "expected_samples",
+            "coverage", "min_viewers", "max_viewers", "mean_viewers", "max_channels", "mean_channels", "unique_streams",
+            "unique_channels", "viewer_hours_estimate"]
+    rows = [(r["bucket"], iso(r["bucket_start"]), iso(r["bucket_end"]), local_iso(r["bucket_start"], tz), r["samples"],
+             r["expected_samples"], r["coverage"], r["min_viewers"], r["max_viewers"], r["mean_viewers"],
+             r["max_channels"], r["mean_channels"], r["unique_streams"], r["unique_channels"], r["viewer_hours"])
+            for r in conn.execute(q + " ORDER BY bucket, bucket_start", args)]
+    return cols, rows
+
+
 def reviews_csv(conn, game_id, start, end, app_id, delimiter=","):
     data = reviews(conn, game_id, start, end, app_id)
     return write_csv(REVIEW_COLUMNS, ([d[c] for c in REVIEW_COLUMNS] for d in data), delimiter)
@@ -233,13 +305,22 @@ def reviews_csv(conn, game_id, start, end, app_id, delimiter=","):
 
 def ccu_gaps(conn, game_id, start, end, interval) -> list[dict]:
     """Intervals longer than 2.5 poll intervals without a successful CCU observation."""
+    return _gaps(conn, game_id, start, end, interval, "ccu_observations", "monitoring_started_at")
+
+
+def twitch_gaps(conn, game_id, start, end, interval) -> list[dict]:
+    """Intervals longer than 2.5 poll intervals without a successful Twitch snapshot."""
+    return _gaps(conn, game_id, start, end, interval, "twitch_snapshots", "twitch_monitoring_started_at")
+
+
+def _gaps(conn, game_id, start, end, interval, table: str, started_column: str) -> list[dict]:
     args: list = [game_id]
-    q = _range("SELECT observed_at FROM ccu_observations WHERE game_id=?", "observed_at", start, end, args)
+    q = _range(f"SELECT observed_at FROM {table} WHERE game_id=?", "observed_at", start, end, args)
     times = [r[0] for r in conn.execute(q + " ORDER BY observed_at", args)]
     game = store.get_game(conn, game_id)
-    if game["monitoring_started_at"] is None:
+    if game[started_column] is None:
         return []
-    lo = max(start or 0, game["monitoring_started_at"])
+    lo = max(start or 0, game[started_column])
     hi = min(end, now()) if end else now()
     if hi <= lo:
         return []
@@ -258,6 +339,8 @@ def metadata(conn, game_id, start, end, settings) -> dict:
     gaps = ccu_gaps(conn, game_id, start, end, settings.ccu_interval)
     first_obs = conn.execute("SELECT MIN(observed_at), MAX(observed_at), COUNT(*) FROM ccu_observations WHERE game_id=?",
                              (game_id,)).fetchone()
+    twitch_gap_list = twitch_gaps(conn, game_id, start, end, settings.twitch_interval)
+    twitch_count = conn.execute("SELECT COUNT(*) FROM twitch_snapshots WHERE game_id=?", (game_id,)).fetchone()[0]
     return {
         "application": "WWP Launch Radar",
         "app_version": __version__,
@@ -289,6 +372,18 @@ def metadata(conn, game_id, start, end, settings) -> dict:
             "ccu_gap_definition": f"no successful observation for more than {2.5 * settings.ccu_interval:.0f} s",
             "review_import": {**imp, "started_at": iso(imp.get("started_at")), "completed_at": iso(imp.get("completed_at"))},
         },
+        "twitch": {
+            "configured": settings.twitch_available,
+            "category_query": game["twitch_category"] or settings.twitch_category or game["name"],
+            "category_id": game["twitch_category_id"],
+            "category_name": game["twitch_category_name"],
+            "monitoring_started_at_utc": iso(game["twitch_monitoring_started_at"]),
+            "poll_interval_seconds": settings.twitch_interval,
+            "snapshot_count_total": twitch_count,
+            "gaps_in_range": twitch_gap_list[:2000],
+            "gap_count_in_range": len(twitch_gap_list),
+            "gap_definition": f"no successful snapshot for more than {2.5 * settings.twitch_interval:.0f} s",
+        },
         "metric_definitions": METRIC_DEFINITIONS,
         "limitations": LIMITATIONS,
     }
@@ -302,6 +397,10 @@ METRIC_DEFINITIONS = {
     "sentiment_changes": "Zmiana rekomendacji zaobserwowana przez monitor między kolejnymi wersjami; czas = timestamp_updated.",
     "positive_pct": "total_positive / (total_positive + total_negative) z migawki Steam dla danej populacji.",
     "first_seen_at": "Chwila, w której monitor po raz pierwszy zobaczył recenzję (czas odkrycia, nie publikacji).",
+    "twitch_total_viewers": "Suma viewer_count wszystkich transmisji na żywo w kategorii gry w chwili migawki (Twitch Helix).",
+    "twitch_live_channels": "Liczba różnych kanałów nadających na żywo w kategorii w chwili migawki.",
+    "twitch_viewer_hours": "Szacunek: suma widzów z migawek × interwał odpytywania / 3600. Przy pokryciu < 1 zaniżony.",
+    "twitch_peak_viewers": "Najwyższa zaobserwowana wartość od rozpoczęcia monitoringu Twitch - nie oficjalna statystyka Twitch.",
 }
 
 LIMITATIONS = [
@@ -312,6 +411,9 @@ LIMITATIONS = [
     "Recenzja nieobecna w wyniku przyrostowym nie jest traktowana jako usunięta.",
     "Zmiany rekomendacji, które nastąpiły przed pierwszą obserwacją recenzji, nie są znane.",
     "Migawki podsumowania Steam z różnych populacji (parametrów zapytania) nie są mieszane.",
+    "Twitch: widoczne są tylko transmisje w kategorii gry; transmisje w innej kategorii (np. Just Chatting) nie są liczone.",
+    "Twitch: krótkie transmisje między migawkami mogą zostać pominięte; godziny oglądania to szacunek z próbek.",
+    "Twitch: viewer_count pochodzi z Twitch i może być opóźniony lub zaokrąglony; nieudane migawki tworzą luki.",
 ]
 
 
@@ -332,6 +434,10 @@ def build_zip(conn: sqlite3.Connection, game_id: int, start, end, settings, dest
             "review_summaries.csv": write_csv(*review_summaries(conn, game_id, start, end, tz), delimiter),
             "review_aggregates.csv": write_csv(*review_aggregates(conn, game_id, start, end, tz), delimiter),
             "annotations.csv": write_csv(*annotations(conn, game_id, start, end, tz), delimiter),
+            "twitch_snapshots.csv": write_csv(*twitch_snapshots(conn, game_id, start, end, tz), delimiter),
+            "twitch_streams.csv": write_csv(*twitch_streams(conn, game_id, start, end), delimiter),
+            "twitch_stream_observations.csv": write_csv(*twitch_stream_observations(conn, game_id, start, end), delimiter),
+            "twitch_aggregates.csv": write_csv(*twitch_aggregates(conn, game_id, start, end, tz), delimiter),
         }
     finally:
         conn.execute("COMMIT")

@@ -11,6 +11,7 @@
   --neg: #e5605a;
   --warn: #e0b84f;
   --info: #6aa7e8;
+  --twitch: #a970ff;
   --grid: #262d36;
   --shadow: 0 1px 2px rgba(0,0,0,.35);
 }
@@ -27,6 +28,7 @@
   --neg: #c33b35;
   --warn: #a8790f;
   --info: #2c6fb8;
+  --twitch: #7c3aed;
   --grid: #e4e8ee;
   --shadow: 0 1px 2px rgba(0,0,0,.08);
 }
@@ -157,6 +159,25 @@ fieldset { border: 1px solid var(--border); border-radius: 8px; }
 
 .u-legend { font-size: 12px; color: var(--text); }
 .u-legend .u-marker { border-radius: 2px; }
+
+.twitch { margin-top: 12px; }
+.twitch > header h2 { color: var(--twitch); }
+.tw-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin-bottom: 10px; }
+.tw-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+.tw-card .big { font-size: 24px; }
+.tw-lists { display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 12px; }
+@media (min-width: 1100px) { .tw-lists { grid-template-columns: 1fr 1.4fr; } }
+.tw-lists h3 { margin-bottom: 6px; }
+.tw-live { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; max-height: 360px; overflow: auto; }
+.tw-live li { display: grid; grid-template-columns: 64px 1fr; gap: 8px; align-items: baseline; font-size: 12.5px; border-bottom: 1px solid var(--border); padding: 4px 0; }
+.tw-live .v { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--twitch); text-align: right; }
+.tw-live .title { color: var(--muted); display: block; overflow-wrap: anywhere; }
+table.tw-top { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.tw-top td, table.tw-top th { padding: 4px 6px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+table.tw-top th { color: var(--muted); font-weight: 500; }
+table.tw-top td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.tw-top .title { color: var(--muted); display: block; overflow-wrap: anywhere; }
+.tw-scroll { overflow: auto; max-height: 360px; }
 
 /* login */
 .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }

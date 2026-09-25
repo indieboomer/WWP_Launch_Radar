@@ -10,12 +10,15 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from . import aggregates, store
 from .config import Settings
 from .db import Database, now, transaction
 from .steam import ShutdownRequested, SteamClient, SteamError
+
+if TYPE_CHECKING:
+    from .twitch import TwitchClient
 
 log = logging.getLogger(__name__)
 
@@ -263,6 +266,7 @@ class Collector:
     settings: Settings
     db: Database
     client: SteamClient | None = None
+    twitch_client: "TwitchClient | None" = None
     stop_event: threading.Event = field(default_factory=threading.Event)
     threads: list[threading.Thread] = field(default_factory=list)
     lock: CollectorLock | None = None
@@ -288,6 +292,15 @@ class Collector:
                 stop_event=self.stop_event,
             )
         targets = [("ccu", self._ccu_loop), ("reviews", self._review_loop), ("aggregates", self._aggregate_loop)]
+        if self.settings.twitch_available:
+            from . import twitch
+            if self.twitch_client is None:
+                self.twitch_client = twitch.TwitchClient(
+                    self.settings.twitch_client_id, self.settings.twitch_client_secret,
+                    timeout=self.settings.http_timeout, max_retries=self.settings.http_max_retries,
+                    max_concurrency=1, min_request_gap=0.2, stop_event=self.stop_event,
+                )
+            targets.append(("twitch", lambda: twitch.twitch_loop(self)))
         if self.settings.ai_available:
             from . import ai
             targets.append(("ai", lambda: ai.ai_loop(self)))
@@ -296,7 +309,9 @@ class Collector:
             t.start()
             self.threads.append(t)
         self.running = True
-        log.info("Collector started (CCU every %ss, reviews every %ss)", self.settings.ccu_interval, self.settings.review_interval)
+        log.info("Collector started (CCU every %ss, reviews every %ss, Twitch %s)", self.settings.ccu_interval,
+                 self.settings.review_interval,
+                 f"every {self.settings.twitch_interval}s" if self.settings.twitch_available else "not configured")
         return True
 
     def stop(self, timeout: float = 15.0) -> None:
@@ -307,6 +322,8 @@ class Collector:
             t.join(max(0.1, deadline - time.monotonic()))
         if self.client:
             self.client.close()
+        if self.twitch_client:
+            self.twitch_client.close()
         if self.lock:
             self.lock.release()
         self.running = False
@@ -412,9 +429,10 @@ class Collector:
         tz = self.settings.display_tz
         game = self._game()
         if game:
-            aggregates.rebuild_all(self.db.conn(), game[0], tz, self.settings.ccu_interval)
+            aggregates.rebuild_all(self.db.conn(), game[0], tz, self.settings.ccu_interval, self.settings.twitch_interval)
         while not self.stop_event.wait(60):
             self.heartbeat["aggregates"] = now()
             game = self._game()
             if game:
-                aggregates.refresh_recent(self.db.conn(), game[0], tz, self.settings.ccu_interval)
+                aggregates.refresh_recent(self.db.conn(), game[0], tz, self.settings.ccu_interval,
+                                          self.settings.twitch_interval)

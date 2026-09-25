@@ -106,6 +106,10 @@ class Settings:
     ai_model: str = "claude-opus-5"
     ai_interval: int = 600
     ai_batch_size: int = 120
+    twitch_client_id: str = ""
+    twitch_client_secret: str = field(default="", repr=False)
+    twitch_category: str = ""  # Twitch category name or id; empty = the game name
+    twitch_interval: int = 60
     log_level: str = "INFO"
 
     @property
@@ -124,6 +128,10 @@ class Settings:
     @property
     def ai_available(self) -> bool:
         return self.ai_enabled and bool(self.anthropic_api_key)
+
+    @property
+    def twitch_available(self) -> bool:
+        return bool(self.twitch_client_id and self.twitch_client_secret)
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -154,6 +162,10 @@ def load_settings(env_file: Path | None = None) -> Settings:
         ai_model=os.environ.get("WWP_AI_MODEL", "claude-opus-5"),
         ai_interval=_int("WWP_AI_INTERVAL", 600, 60),
         ai_batch_size=_int("WWP_AI_BATCH_SIZE", 120, 5),
+        twitch_client_id=os.environ.get("WWP_TWITCH_CLIENT_ID", "").strip(),
+        twitch_client_secret=os.environ.get("WWP_TWITCH_CLIENT_SECRET", "").strip(),
+        twitch_category=os.environ.get("WWP_TWITCH_CATEGORY", "").strip(),
+        twitch_interval=_int("WWP_TWITCH_INTERVAL", 60, 30),
         log_level=os.environ.get("WWP_LOG_LEVEL", "INFO"),
     )
     try:

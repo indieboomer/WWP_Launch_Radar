@@ -18,6 +18,9 @@ services:
       WWP_TRUST_PROXY_AUTH: "${WWP_TRUST_PROXY_AUTH:-false}"
       WWP_AI_ENABLED: "${WWP_AI_ENABLED:-false}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      WWP_TWITCH_CLIENT_ID: "${WWP_TWITCH_CLIENT_ID:-}"
+      WWP_TWITCH_CLIENT_SECRET: "${WWP_TWITCH_CLIENT_SECRET:-}"
+      WWP_TWITCH_CATEGORY: "${WWP_TWITCH_CATEGORY:-}"
     volumes:
       - wwp-data:/data
     healthcheck:

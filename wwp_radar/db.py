@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -233,6 +233,80 @@ MIGRATIONS: dict[int, str] = {
         PRIMARY KEY (run_id, recommendation_id)
     );
     CREATE INDEX ix_ai_assign_review ON ai_review_assignments(game_id, recommendation_id, content_hash);
+    """,
+    2: """
+    -- Twitch live-stream monitoring ---------------------------------------------
+    ALTER TABLE games ADD COLUMN twitch_category TEXT;               -- user-configured name or id, NULL = default
+    ALTER TABLE games ADD COLUMN twitch_category_id TEXT;            -- resolved Twitch category (game) id
+    ALTER TABLE games ADD COLUMN twitch_category_name TEXT;
+    ALTER TABLE games ADD COLUMN twitch_monitoring_started_at INTEGER;
+
+    -- One row per complete, successful walk of the category's live streams.
+    -- Failed or partial walks are only in collection_runs (source = twitch).
+    CREATE TABLE twitch_snapshots (
+        id             INTEGER PRIMARY KEY,
+        game_id        INTEGER NOT NULL REFERENCES games(id),
+        observed_at    INTEGER NOT NULL,
+        category_id    TEXT NOT NULL,
+        live_channels  INTEGER NOT NULL CHECK (live_channels >= 0),
+        total_viewers  INTEGER NOT NULL CHECK (total_viewers >= 0),
+        pages          INTEGER NOT NULL,
+        UNIQUE (game_id, observed_at)
+    );
+
+    -- One row per Twitch broadcast (stream id) seen in the category.
+    CREATE TABLE twitch_streams (
+        game_id        INTEGER NOT NULL REFERENCES games(id),
+        stream_id      TEXT NOT NULL,
+        user_id        TEXT NOT NULL,
+        user_login     TEXT NOT NULL,
+        user_name      TEXT,
+        category_id    TEXT NOT NULL,
+        title          TEXT,                  -- latest observed title
+        language       TEXT,
+        is_mature      INTEGER,
+        tags           TEXT,                  -- JSON list, latest observed
+        started_at     INTEGER,               -- Twitch broadcast start (UTC epoch)
+        first_seen_at  INTEGER NOT NULL,      -- first snapshot that contained the stream
+        last_seen_at   INTEGER NOT NULL,      -- last snapshot that contained the stream
+        samples        INTEGER NOT NULL,
+        viewer_sum     INTEGER NOT NULL,      -- sum of viewer_count over samples (mean = sum / samples)
+        peak_viewers   INTEGER NOT NULL,
+        peak_at        INTEGER NOT NULL,
+        PRIMARY KEY (game_id, stream_id)
+    );
+    CREATE INDEX ix_twitch_streams_seen ON twitch_streams(game_id, last_seen_at);
+    CREATE INDEX ix_twitch_streams_user ON twitch_streams(game_id, user_id);
+
+    CREATE TABLE twitch_stream_observations (
+        snapshot_id    INTEGER NOT NULL REFERENCES twitch_snapshots(id),
+        game_id        INTEGER NOT NULL,
+        stream_id      TEXT NOT NULL,
+        observed_at    INTEGER NOT NULL,
+        viewer_count   INTEGER NOT NULL CHECK (viewer_count >= 0),
+        PRIMARY KEY (snapshot_id, stream_id)
+    );
+    CREATE INDEX ix_twitch_obs_time ON twitch_stream_observations(game_id, observed_at);
+    CREATE INDEX ix_twitch_obs_stream ON twitch_stream_observations(game_id, stream_id, observed_at);
+
+    CREATE TABLE twitch_aggregates (
+        game_id          INTEGER NOT NULL REFERENCES games(id),
+        bucket           TEXT NOT NULL,        -- 5m | 1h | 1d
+        bucket_start     INTEGER NOT NULL,
+        bucket_end       INTEGER NOT NULL,
+        samples          INTEGER NOT NULL,
+        expected_samples REAL NOT NULL,
+        coverage         REAL NOT NULL,
+        min_viewers      INTEGER,
+        max_viewers      INTEGER,
+        mean_viewers     REAL,
+        max_channels     INTEGER,
+        mean_channels    REAL,
+        unique_streams   INTEGER NOT NULL,
+        unique_channels  INTEGER NOT NULL,
+        viewer_hours     REAL NOT NULL,        -- estimate: sum(total_viewers) * poll interval / 3600
+        PRIMARY KEY (game_id, bucket, bucket_start)
+    );
     """,
 }
 

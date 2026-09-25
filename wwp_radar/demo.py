@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import random
+from datetime import datetime, timezone
 
 from . import aggregates, store
 from .collector import SUMMARY_POPULATIONS
@@ -36,7 +37,7 @@ def generate(settings: Settings, hours: int = 48, seed: int = 7) -> str:
         gid = store.ensure_game(conn, settings.app_id, settings.game_name + " (DEMO)")
         store.set_setting(conn, "active_game_id", str(gid))
         conn.execute("UPDATE games SET launch_at=?, monitoring_started_at=? WHERE id=?", (start + 3600 * 2, start, gid))
-        for table in ("ccu_observations", "reviews", "review_versions", "review_summary_snapshots", "annotations",
+        for table in ("twitch_stream_observations", "twitch_snapshots", "twitch_streams", "ccu_observations", "reviews", "review_versions", "review_summary_snapshots", "annotations",
                       "collection_runs", "checkpoints"):
             conn.execute(f"DELETE FROM {table} WHERE game_id=?", (gid,))
         t = start
@@ -85,12 +86,49 @@ def generate(settings: Settings, hours: int = 48, seed: int = 7) -> str:
                                       "review_score": 6, "review_score_desc": "Mostly Positive"})
         store.set_checkpoint(conn, gid, "import", {"status": "complete", "started_at": start, "completed_at": start + 60,
                                                    "reviews_seen": 600, "expected_total": 600, "pages": 6})
-        for src in ("ccu", "reviews_recent", "reviews_updated", "review_summary"):
+        _twitch(conn, gid, rng, start + 7200, end, settings.twitch_interval, outage=(start + 20 * 3600, start + 20 * 3600 + 2400),
+                big_stream_at=start + 30 * 3600)
+        for src in ("ccu", "reviews_recent", "reviews_updated", "review_summary", "twitch"):
             store.record_run(conn, gid, src, end - 5, "ok", items=1, finished_at=end)
     for at, kind, title in ((start + 7200, "launch", "Premiera Early Access"),
                             (start + 26 * 3600, "hotfix", "Hotfix 0.1.1 - crash przy zapisie"),
                             (start + 30 * 3600, "stream", "Stream dewelopera")):
         store.create_annotation(conn, gid, at, kind, title, "Dane demonstracyjne")
-    aggregates.rebuild_all(conn, gid, settings.display_tz, settings.ccu_interval)
+    aggregates.rebuild_all(conn, gid, settings.display_tz, settings.ccu_interval, settings.twitch_interval)
     db.close()
     return str(settings.db_path)
+
+
+STREAM_TITLES = ["Wild West Pioneers - pierwsze wrażenia!", "Building the perfect frontier town", "EA launch day stream",
+                 "Budujemy miasteczko na Dzikim Zachodzie", "Chill colony building", "Bandits everywhere?! | !discord"]
+STREAM_LANGS = ["en", "en", "en", "pl", "de", "ru", "es", "fr"]
+
+
+def _twitch(conn, gid, rng: random.Random, start: int, end: int, interval: int, outage: tuple[int, int],
+            big_stream_at: int) -> None:
+    """Simulated Twitch category: many small streams plus one large streamer (matches the 'stream' annotation)."""
+    conn.execute("UPDATE games SET twitch_monitoring_started_at=?, twitch_category_id=?, twitch_category_name=? WHERE id=?",
+                 (start, "5550001", "Wild West Pioneers", gid))
+    sessions = []
+    for k in range(70):
+        user = rng.randrange(28)
+        s0 = start + int(rng.random() * (end - start))
+        sessions.append({"id": f"demo{k}", "user": user, "from": s0, "to": s0 + rng.randint(3600, 5 * 3600),
+                         "base": max(1, int(rng.lognormvariate(3.0, 1.1))), "title": rng.choice(STREAM_TITLES),
+                         "lang": STREAM_LANGS[user % len(STREAM_LANGS)]})
+    sessions.append({"id": "demo-big", "user": 99, "from": big_stream_at, "to": big_stream_at + 3 * 3600, "base": 4200,
+                     "title": "DEV STREAM: Wild West Pioneers Q&A", "lang": "en"})
+    t = start
+    while t < end:
+        if not (outage[0] <= t < outage[1]):
+            live = []
+            for x in sessions:
+                if x["from"] <= t < x["to"]:
+                    ramp = min(1.0, (t - x["from"]) / 900)
+                    live.append({"id": x["id"], "user_id": f"demo-u{x['user']}", "user_login": f"demo_streamer{x['user']}",
+                                 "user_name": f"DemoStreamer{x['user']}", "title": x["title"], "language": x["lang"],
+                                 "viewer_count": max(0, int(x["base"] * ramp * rng.uniform(0.9, 1.1))),
+                                 "started_at": datetime.fromtimestamp(x["from"], timezone.utc).isoformat(),
+                                 "tags": [], "is_mature": False})
+            store.insert_twitch_snapshot(conn, gid, t + rng.randint(0, 3), "5550001", live, 1)
+        t += interval

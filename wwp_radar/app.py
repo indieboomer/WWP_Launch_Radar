@@ -55,7 +55,7 @@ def create_app(settings: Settings | None = None, start_collector: bool | None = 
             await asyncio.to_thread(collector.start)
         else:
             gid = store.active_game_id(db.conn())
-            await asyncio.to_thread(aggregates.rebuild_all, db.conn(), gid, settings.display_tz, settings.ccu_interval)
+            await asyncio.to_thread(aggregates.rebuild_all, db.conn(), gid, settings.display_tz, settings.ccu_interval, settings.twitch_interval)
         yield
         await asyncio.to_thread(collector.stop)
 
@@ -171,6 +171,13 @@ def create_app(settings: Settings | None = None, start_collector: bool | None = 
             "import": import_status(g["id"]),
             "data_start": min(x for x in (g["monitoring_started_at"], first_review, now()) if x is not None),
             "ai": {"enabled": settings.ai_enabled, "available": settings.ai_available, "model": settings.ai_model},
+            "twitch": {
+                "available": settings.twitch_available,
+                "interval": settings.twitch_interval,
+                "category_query": twitch_category_query(g),
+                "category_id": g["twitch_category_id"],
+                "category_name": g["twitch_category_name"],
+            },
             "auth": settings.auth_enabled,
             "summary_populations": {k: v["label"] for k, v in SUMMARY_POPULATIONS.items()},
         }
@@ -337,6 +344,118 @@ def create_app(settings: Settings | None = None, start_collector: bool | None = 
         return {"resolution": res, "population": population, "label": SUMMARY_POPULATIONS.get(population, {}).get("label"),
                 "t": [r["t"] for r in rows], "pct": pct, "total": [r["total_reviews"] for r in rows]}
 
+    # -- Twitch ---------------------------------------------------------------------------------
+    def twitch_category_query(g: dict) -> str:
+        return (g["twitch_category"] or settings.twitch_category or g["name"]).strip()
+
+    def twitch_url(login: str) -> str:
+        return f"https://www.twitch.tv/{login}"
+
+    @app.get("/api/twitch/overview")
+    def twitch_overview(game_id: Optional[int] = None, start: Optional[int] = Query(None, alias="from"),
+                        end: Optional[int] = Query(None, alias="to")):
+        g = game_or_404(game_id)
+        gid = g["id"]
+        c = conn()
+        t = now()
+        start, end = resolve(start, end, g)
+        latest = c.execute("SELECT * FROM twitch_snapshots WHERE game_id=? ORDER BY observed_at DESC LIMIT 1",
+                           (gid,)).fetchone()
+        stale = latest is None or t - latest["observed_at"] > 3 * settings.twitch_interval
+        peak = c.execute("SELECT observed_at, total_viewers FROM twitch_snapshots WHERE game_id=? "
+                         "ORDER BY total_viewers DESC, observed_at ASC LIMIT 1", (gid,)).fetchone()
+        peak_ch = c.execute("SELECT observed_at, live_channels FROM twitch_snapshots WHERE game_id=? "
+                            "ORDER BY live_channels DESC, observed_at ASC LIMIT 1", (gid,)).fetchone()
+        last_run = c.execute("SELECT status, finished_at, error FROM collection_runs WHERE game_id=? AND source='twitch' "
+                             "ORDER BY id DESC LIMIT 1", (gid,)).fetchone()
+        live = []
+        if latest is not None and not stale:
+            for r in c.execute(
+                    "SELECT s.*, o.viewer_count FROM twitch_stream_observations o JOIN twitch_streams s "
+                    "ON s.game_id=o.game_id AND s.stream_id=o.stream_id WHERE o.snapshot_id=? "
+                    "ORDER BY o.viewer_count DESC, s.user_login", (latest["id"],)):
+                live.append({"stream_id": r["stream_id"], "user_login": r["user_login"], "user_name": r["user_name"],
+                             "title": r["title"], "language": r["language"], "viewers": r["viewer_count"],
+                             "started_at": r["started_at"], "peak_viewers": r["peak_viewers"],
+                             "url": twitch_url(r["user_login"])})
+        rng = c.execute(
+            "SELECT COUNT(*) AS samples, SUM(total_viewers) AS viewer_sum, MAX(total_viewers) AS peak_viewers, "
+            "MAX(live_channels) AS peak_channels, AVG(total_viewers) AS mean_viewers FROM twitch_snapshots "
+            "WHERE game_id=? AND observed_at>=? AND observed_at<?", (gid, start, end)).fetchone()
+        uniq = c.execute(
+            "SELECT COUNT(DISTINCT o.stream_id) AS streams, COUNT(DISTINCT s.user_id) AS channels "
+            "FROM twitch_stream_observations o JOIN twitch_streams s ON s.game_id=o.game_id AND s.stream_id=o.stream_id "
+            "WHERE o.game_id=? AND o.observed_at>=? AND o.observed_at<?", (gid, start, end)).fetchone()
+        top = []
+        for r in c.execute(
+                "SELECT o.stream_id, MAX(o.viewer_count) AS peak, AVG(o.viewer_count) AS mean, COUNT(*) AS samples, "
+                "MIN(o.observed_at) AS first_at, MAX(o.observed_at) AS last_at, s.user_login, s.user_name, s.title, "
+                "s.language, s.started_at FROM twitch_stream_observations o JOIN twitch_streams s "
+                "ON s.game_id=o.game_id AND s.stream_id=o.stream_id "
+                "WHERE o.game_id=? AND o.observed_at>=? AND o.observed_at<? "
+                "GROUP BY o.stream_id ORDER BY peak DESC, samples DESC LIMIT 25", (gid, start, end)):
+            top.append({**dict(r), "mean": round(r["mean"], 1),
+                        "viewer_hours": round(r["mean"] * r["samples"] * settings.twitch_interval / 3600, 1),
+                        "url": twitch_url(r["user_login"])})
+        return {
+            "now": t,
+            "available": settings.twitch_available,
+            "category": {"query": twitch_category_query(g), "id": g["twitch_category_id"],
+                         "name": g["twitch_category_name"]},
+            "current": ({"observed_at": latest["observed_at"], "total_viewers": latest["total_viewers"],
+                         "live_channels": latest["live_channels"]} if latest else None),
+            "stale": stale,
+            "last_run": dict(last_run) if last_run else None,
+            "peak_viewers": dict(peak) if peak else None,
+            "peak_channels": dict(peak_ch) if peak_ch else None,
+            "live": live,
+            "range": {
+                "from": start, "to": end, "samples": rng["samples"],
+                "peak_viewers": rng["peak_viewers"], "peak_channels": rng["peak_channels"],
+                "mean_viewers": round(rng["mean_viewers"], 1) if rng["mean_viewers"] is not None else None,
+                "viewer_hours": round((rng["viewer_sum"] or 0) * settings.twitch_interval / 3600, 1),
+                "unique_streams": uniq["streams"], "unique_channels": uniq["channels"],
+            },
+            "top_streams": top,
+        }
+
+    @app.get("/api/twitch/series")
+    def twitch_series(game_id: Optional[int] = None, start: Optional[int] = Query(None, alias="from"),
+                      end: Optional[int] = Query(None, alias="to")):
+        g = game_or_404(game_id)
+        start, end = resolve(start, end, g)
+        span = end - start
+        c = conn()
+        if span <= 12 * 3600:
+            rows = c.execute("SELECT observed_at, total_viewers, live_channels FROM twitch_snapshots WHERE game_id=? "
+                             "AND observed_at>=? AND observed_at<? ORDER BY observed_at", (g["id"], start, end)).fetchall()
+            gap = 2.5 * settings.twitch_interval
+            ts, viewers, channels = [], [], []
+            prev = None
+            for r in rows:
+                if prev is not None and r[0] - prev > gap:
+                    ts.append(prev + settings.twitch_interval)  # explicit gap marker, not an observation
+                    viewers.append(None)
+                    channels.append(None)
+                ts.append(r[0])
+                viewers.append(r[1])
+                channels.append(r[2])
+                prev = r[0]
+            return {"resolution": "raw", "t": ts, "viewers": viewers, "channels": channels, "max": None, "coverage": None}
+        bucket = "5m" if span <= 7 * 86400 else "1h" if span <= 90 * 86400 else "1d"
+        rows = c.execute("SELECT * FROM twitch_aggregates WHERE game_id=? AND bucket=? AND bucket_start>=? "
+                         "AND bucket_start<? ORDER BY bucket_start",
+                         (g["id"], bucket, aggregates.bucket_bounds(start, bucket, ZoneInfo(settings.display_tz))[0],
+                          end)).fetchall()
+        return {
+            "resolution": bucket,
+            "t": [r["bucket_start"] for r in rows],
+            "viewers": [r["mean_viewers"] for r in rows],
+            "channels": [r["mean_channels"] for r in rows],
+            "max": [r["max_viewers"] for r in rows],
+            "coverage": [r["coverage"] for r in rows],
+        }
+
     # -- review feed ---------------------------------------------------------------------------
     @app.get("/api/languages")
     def languages(game_id: Optional[int] = None):
@@ -453,16 +572,21 @@ def create_app(settings: Settings | None = None, start_collector: bool | None = 
                 gid = store.ensure_game(c, app_id, name)
                 c.execute("UPDATE games SET name=? WHERE id=?", (name, gid))
                 store.set_setting(c, "active_game_id", str(gid))
+            if "twitch_category" in body:
+                v = str(body["twitch_category"] or "").strip()[:200]
+                if (v or None) != store.get_game(c, gid)["twitch_category"]:
+                    # Resolved again on the next Twitch poll. Stored snapshots keep their own category id.
+                    store.set_twitch_category(c, gid, v or None, None, None)
             if "launch_at" in body:
                 v = body["launch_at"]
                 c.execute("UPDATE games SET launch_at=? WHERE id=?", (int(v) if v not in (None, "") else None, gid))
-        aggregates.rebuild_all(c, gid, settings.display_tz, settings.ccu_interval)
+        aggregates.rebuild_all(c, gid, settings.display_tz, settings.ccu_interval, settings.twitch_interval)
         return {"ok": True, "active_game_id": gid}
 
     @app.post("/api/aggregates/rebuild")
     def rebuild(game_id: Optional[int] = None):
         g = game_or_404(game_id)
-        aggregates.rebuild_all(conn(), g["id"], settings.display_tz, settings.ccu_interval)
+        aggregates.rebuild_all(conn(), g["id"], settings.display_tz, settings.ccu_interval, settings.twitch_interval)
         return {"ok": True}
 
     # -- AI ------------------------------------------------------------------------------------
@@ -525,6 +649,14 @@ def create_app(settings: Settings | None = None, start_collector: bool | None = 
             body = exports.write_csv(*exports.review_aggregates(c, g["id"], start, end, tz), d)
         elif dataset == "annotations":
             body = exports.write_csv(*exports.annotations(c, g["id"], start, end, tz), d)
+        elif dataset == "twitch_snapshots":
+            body = exports.write_csv(*exports.twitch_snapshots(c, g["id"], start, end, tz), d)
+        elif dataset == "twitch_streams":
+            body = exports.write_csv(*exports.twitch_streams(c, g["id"], start, end), d)
+        elif dataset == "twitch_stream_observations":
+            body = exports.write_csv(*exports.twitch_stream_observations(c, g["id"], start, end), d)
+        elif dataset == "twitch_aggregates":
+            body = exports.write_csv(*exports.twitch_aggregates(c, g["id"], start, end, tz, bucket), d)
         else:
             raise HTTPException(404, "unknown dataset")
         return _download(body, "text/csv; charset=utf-8", _filename(g, dataset, "csv"))

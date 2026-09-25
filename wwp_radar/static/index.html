@@ -22,6 +22,7 @@
     <span class="pill" id="st-app" title="Stan aplikacji i kolektora">Aplikacja: …</span>
     <span class="pill" id="st-steam" title="Dostępność źródeł Steam">Steam: …</span>
     <span class="pill" id="st-import" title="Kompletność importu historii recenzji">Import: …</span>
+    <span class="pill" id="st-twitch" title="Monitoring transmisji Twitch" hidden>Twitch: …</span>
   </div>
   <div class="actions">
     <button class="btn primary" id="btn-export">⤓ Eksportuj dane</button>
@@ -114,6 +115,34 @@
     </article>
   </section>
 
+  <section class="panel twitch" id="twitch-panel">
+    <header><h2>Twitch - transmisje na żywo</h2><span class="hint" id="tw-category"></span></header>
+    <div id="tw-off" class="muted" hidden>
+      Monitoring Twitch nie jest skonfigurowany. Ustaw <code>WWP_TWITCH_CLIENT_ID</code> i
+      <code>WWP_TWITCH_CLIENT_SECRET</code> (aplikacja na <a href="https://dev.twitch.tv/console/apps" target="_blank" rel="noopener noreferrer">dev.twitch.tv</a>)
+      i uruchom ponownie. Zapisane wcześniej dane są nadal widoczne poniżej.
+    </div>
+    <div class="tw-cards">
+      <div class="tw-card"><h3>Widzowie teraz</h3><div class="big" id="tw-viewers">–</div><div class="meta" id="tw-viewers-meta"></div></div>
+      <div class="tw-card"><h3>Kanały na żywo</h3><div class="big" id="tw-channels">–</div><div class="meta" id="tw-channels-meta"></div></div>
+      <div class="tw-card"><h3>Najwyższe zaobserwowane</h3><div class="big" id="tw-peak">–</div><div class="meta" id="tw-peak-meta">widzów łącznie, od rozpoczęcia monitoringu</div></div>
+      <div class="tw-card"><h3>Godziny oglądania (zakres)</h3><div class="big" id="tw-hours">–</div><div class="meta" id="tw-hours-meta">szacunek z migawek</div></div>
+      <div class="tw-card"><h3>Unikalne kanały (zakres)</h3><div class="big" id="tw-unique">–</div><div class="meta" id="tw-unique-meta"></div></div>
+    </div>
+    <div class="chart" id="chart-twitch"></div>
+    <p class="foot">Suma widzów wszystkich transmisji w kategorii gry na Twitchu (lewa oś) i liczba kanałów na żywo (prawa oś). Przerwy w linii = brak udanych migawek. <span id="tw-res"></span></p>
+    <div class="tw-lists">
+      <div>
+        <h3>Na żywo teraz</h3>
+        <ul class="tw-live" id="tw-live"></ul>
+      </div>
+      <div>
+        <h3>Największe transmisje w wybranym zakresie</h3>
+        <div class="tw-scroll"><table class="tw-top" id="tw-top"></table></div>
+      </div>
+    </div>
+  </section>
+
   <section class="lower">
     <article class="panel feed">
       <header><h2>Recenzje</h2><span class="hint" id="feed-count"></span></header>
@@ -186,6 +215,10 @@
       <tr><td>Migawki podsumowania recenzji</td><td class="muted">filtr: czas obserwacji</td><td><a data-ds="review_summaries">CSV</a></td></tr>
       <tr><td>Agregaty recenzji</td><td class="muted">filtr: początek kubełka</td><td><a data-ds="review_aggregates">CSV</a></td></tr>
       <tr><td>Adnotacje</td><td class="muted">filtr: czas zdarzenia</td><td><a data-ds="annotations">CSV</a></td></tr>
+      <tr><td>Migawki Twitch (widzowie, kanały)</td><td class="muted">filtr: czas migawki</td><td><a data-ds="twitch_snapshots">CSV</a></td></tr>
+      <tr><td>Transmisje Twitch</td><td class="muted">filtr: okres widoczności nakłada się na zakres</td><td><a data-ds="twitch_streams">CSV</a></td></tr>
+      <tr><td>Widzowie per transmisja</td><td class="muted">filtr: czas migawki</td><td><a data-ds="twitch_stream_observations">CSV</a></td></tr>
+      <tr><td>Agregaty Twitch (5m/1h/1d)</td><td class="muted">filtr: początek kubełka</td><td><a data-ds="twitch_aggregates">CSV</a></td></tr>
       <tr class="hl"><td><b>Pełna paczka analityczna</b></td><td class="muted">wszystko + metadata.json</td><td><a data-ds="zip">ZIP</a></td></tr>
       <tr><td>Kopia zapasowa bazy SQLite</td><td class="muted">cała baza, spójna kopia (backup API)</td><td><a data-ds="backup">SQLite</a></td></tr>
     </table>
@@ -207,6 +240,9 @@
       </div>
       <p class="muted">Zmiana App ID przełącza monitoring na inną grę. Dane poprzedniej gry pozostają w bazie, a historie są rozdzielone.</p>
     </fieldset>
+    <label>Kategoria Twitch (nazwa lub ID)
+      <input type="text" id="set-twitch" maxlength="200"></label>
+    <p class="muted" id="set-twitch-hint">Puste = nazwa gry. Nazwa musi dokładnie odpowiadać kategorii na Twitchu.</p>
     <div class="row"><button type="button" class="btn ghost" id="set-rebuild">Przebuduj agregaty</button></div>
     <div class="row end">
       <button type="button" class="btn ghost" id="set-cancel">Anuluj</button>

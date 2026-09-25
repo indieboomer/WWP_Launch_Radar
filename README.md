@@ -12,7 +12,7 @@ in [`docs/SPEC.md`](docs/SPEC.md).
   Closing the dashboard does not stop it, and extra tabs do not start extra collectors. An OS-level lock
   file lets only one collector write to a data directory.
 - **Storage:** SQLite (WAL mode) with versioned migrations. Raw data is kept forever, and aggregates can be rebuilt from it.
-- **No external services** except Steam (and Anthropic, if you enable the AI feature). Chart assets
+- **No external services** except Steam (plus Twitch and Anthropic, if you enable those features). Chart assets
   (uPlot 1.6.32) are bundled in `wwp_radar/static/vendor`.
 
 ---
@@ -80,6 +80,8 @@ All settings are environment variables (or `.env`). See [`.env.example`](.env.ex
 | `WWP_TRUST_PROXY_AUTH` | false | Allow a non-localhost bind without a password when an authenticating reverse proxy protects the app |
 | `WWP_DATA_DIR` | `%LOCALAPPDATA%\WWPLaunchRadar`, `/data` in Docker | Database location |
 | `WWP_AI_ENABLED`, `ANTHROPIC_API_KEY`, `WWP_AI_MODEL` | off, –, `claude-opus-5` | Optional AI analysis |
+| `WWP_TWITCH_CLIENT_ID`, `WWP_TWITCH_CLIENT_SECRET` | empty | Enables Twitch live-stream monitoring |
+| `WWP_TWITCH_CATEGORY` / `WWP_TWITCH_INTERVAL` | game name / 60 s | Twitch category (exact name or id) and poll interval |
 
 **Changing the App ID** (in *Ustawienia*) creates or selects a separate game record. All data is keyed
 by game, so earlier histories, checkpoints and annotations stay intact and separate. Exports have a game selector.
@@ -127,6 +129,38 @@ Two resumable **walkers** keep the review records complete:
 
   Stored review records also carry `steam_purchase` / `received_for_free`, so the feed and exports can
   split Steam purchases from other acquisition types (keys, gifts, free).
+
+### Twitch live streams (optional)
+Off until `WWP_TWITCH_CLIENT_ID` and `WWP_TWITCH_CLIENT_SECRET` are set. Register an app at
+<https://dev.twitch.tv/console/apps> (any OAuth redirect URL, e.g. `http://localhost`), then copy the Client ID and
+generate a Client Secret. The app uses an **app access token** (client-credentials flow). It reads only public data
+and needs no Twitch login. The token is refreshed automatically when it expires or Twitch rejects it.
+
+Every `WWP_TWITCH_INTERVAL` (60 s, same fixed schedule as CCU) the collector walks **all** live streams in the game's Twitch
+category (`GET /helix/streams?game_id=…&type=live`, 100 per page) and stores one snapshot:
+
+- `twitch_snapshots`: total viewers and number of live channels in the category at that moment.
+- `twitch_stream_observations`: each stream's viewer count in that snapshot.
+- `twitch_streams`: one row per broadcast (stream id) with channel, latest title, language, tags, Twitch start time,
+  first/last time seen by the monitor, samples, peak viewers (and when), and the viewer sum for the mean.
+
+Same rules as CCU: **a failed or partial walk is never stored** (a failure never looks like 0 viewers). It is
+logged in `collection_runs` (source `twitch`) and shows in *Źródła danych*. A successful walk with nobody live is a
+real 0. A category that doesn't exist on Twitch yet is `unavailable`. Streams that move between pages during the
+walk are deduplicated by stream id.
+
+**Category:** `WWP_TWITCH_CATEGORY` (exact name or numeric id), otherwise the game name. It can also be set per
+game in *Ustawienia → Kategoria Twitch*. It is looked up once and cached, and changing it triggers a fresh lookup. Every
+snapshot stores the category id it was taken from.
+
+Dashboard panel *Twitch - transmisje na żywo*: viewers and live channels now, highest observed total viewers
+(since Twitch monitoring started; not an official Twitch statistic), estimated hours watched and unique channels
+in the selected range, a viewers/channels chart (raw ≤ 12 h, then 5-min/hourly/daily mean + max, gaps not
+interpolated), the list of channels live right now with links, and the biggest streams in the range. Use
+the *Stream* annotation type to mark notable streams on every chart.
+
+Limits: only streams **in the game's category** count (someone playing it under *Just Chatting* is not seen).
+Streams shorter than one poll interval can be missed. Hours watched is an estimate: Σ(total viewers per snapshot) × interval ÷ 3600.
 
 ### Reliability
 Timeouts (20 s), up to 4 retries with exponential backoff and jitter, `Retry-After` handling for 429/503,
@@ -188,6 +222,10 @@ and the dialog accepts times in the display timezone.
 | 5 | Review-summary snapshots (with population + query params) | CSV | observation time |
 | 6 | Review aggregates | CSV | bucket start |
 | 7 | Annotations | CSV | event time |
+| 7a | Twitch snapshots (total viewers, live channels) | CSV | snapshot time |
+| 7b | Twitch streams (channel, title, peak/mean viewers) | CSV | stream's observed lifetime overlaps the range |
+| 7c | Twitch viewers per stream per snapshot | CSV | snapshot time |
+| 7d | Twitch aggregates (5m/1h/1d, incl. unique channels and estimated hours watched) | CSV | bucket start |
 | 8 | **Analysis ZIP**: all of the above + `metadata.json` | ZIP | per dataset, as above. One consistent read snapshot |
 | 9 | **SQLite backup** | .sqlite3 | whole database, via the SQLite online backup API |
 
@@ -275,10 +313,12 @@ Only run one collector for a game at a time. Otherwise both instances record dup
 wwp_radar/
   config.py      settings (.env / environment), exposure guard
   db.py          SQLite connection, migrations, online backup
-  steam.py       Steam HTTP client (timeouts, retries, backoff, rate limits, concurrency)
+  httpclient.py  shared HTTP client (timeouts, retries, backoff, rate limits, concurrency)
+  steam.py       Steam endpoints
+  twitch.py      optional Twitch Helix client + category snapshots
   store.py       data access, review dedup/versioning, health, checkpoints, annotations
   collector.py   collector threads, lock file, resumable review walkers, summaries
-  aggregates.py  rebuildable CCU/review/summary aggregates
+  aggregates.py  rebuildable CCU/review/summary/Twitch aggregates
   exports.py     CSV/JSON/ZIP exports + metadata
   ai.py          optional Claude analysis
   app.py         FastAPI app, API, auth middleware
@@ -293,7 +333,7 @@ Dependencies are pinned in `requirements.txt` (direct deps in `requirements.in`)
 
 ## 10. Validation and known limitations
 
-**Automated tests** (`pytest`, 33 tests, deterministic, no network) cover: failed, network-error and HTTP-404
+**Automated tests** (`pytest`, 46 tests, deterministic, no network) cover: failed, network-error and HTTP-404
 CCU responses never stored as zero, while a real `0` is stored; review deduplication, immutable versions and sentiment-change
 flags; import resume from a checkpointed cursor after restart; multi-page catch-up after downtime;
 cursor retention on transient errors; reconciliation of edits to old reviews; no deletion on missing reviews;
@@ -301,7 +341,7 @@ CCU bucket gaps and coverage, Warsaw hourly alignment and 23/25 h DST days; revi
 with no import burst; CSV BOM, quoting, formula injection, delimiters; date-filter semantics (creation vs. observation
 time); ZIP contents and metadata; persistence and idempotent migrations across restarts; consistent backup under
 concurrent writes; App ID switching keeping data separate; API endpoints; auth enforcement; AI validation, redaction and
-no reprocessing (with a stub client).
+no reprocessing (with a stub client); Twitch: full pagination, category lookup by name/id, unknown category as unavailable, failed or partial walks never stored, a real 0 stored, token refresh on 401, rejected credentials, per-stream stats, bucket coverage/gaps/hours watched, API and exports (with a fake Helix backend).
 
 **Live smoke test (2026-09-25):** the collector ran against real Steam. For App 3222640 (not yet released) CCU comes back
 as *unavailable* (HTTP 404, `result: 42`), so nothing is stored. The review import completed with 0 reviews, and summaries were
@@ -309,7 +349,8 @@ stored. Real cursor pagination and summaries were checked on a released game (Ha
 17 languages.
 
 **Not verified here:** building and running the Docker image (Docker Desktop was not running on the development machine;
-both compose files pass `docker compose config`), and a live AI call (no API key was used; tests use a stub).
+both compose files pass `docker compose config`), a live AI call (no API key was used; tests use a stub), and a live
+Twitch call (no Twitch credentials were used; tests use a fake Helix backend, and the endpoints follow the Twitch Helix docs).
 
 Limitations:
 - CCU before monitoring started is not available from Steam. CCU is not tracked while the process is stopped or the PC sleeps.

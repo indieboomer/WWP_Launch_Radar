@@ -25,6 +25,9 @@ services:
       WWP_AI_ENABLED: "${WWP_AI_ENABLED:-false}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       WWP_AI_MODEL: "${WWP_AI_MODEL:-claude-opus-5}"
+      WWP_TWITCH_CLIENT_ID: "${WWP_TWITCH_CLIENT_ID:-}"
+      WWP_TWITCH_CLIENT_SECRET: "${WWP_TWITCH_CLIENT_SECRET:-}"
+      WWP_TWITCH_CATEGORY: "${WWP_TWITCH_CATEGORY:-}"
     volumes:
       - wwp-data:/data
 
