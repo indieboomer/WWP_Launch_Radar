@@ -1,280 +1,320 @@
-Build a complete, working application called **WWP Launch Radar** for monitoring the Early Access launch of Wild West Pioneers on Steam.
+# WWP Launch Radar
 
-Implement the application, not just a plan. Make reasonable implementation decisions autonomously. Prioritize reliable collection, durable historical data, and a usable dashboard.
+Local monitor for the Steam Early Access launch of **Wild West Pioneers** (App ID `3222640`).
+It polls the concurrent player count (CCU) and Steam reviews, stores every observation in SQLite, builds
+historical aggregates, and serves a dark, Polish-language dashboard with charts, a review feed, event
+annotations and one-click exports. Optional AI analysis groups recurring review themes.
 
-## 1. Purpose and scope
+Sales, revenue, wishlists and financial Steamworks data are out of scope. The original requirements are
+in [`docs/SPEC.md`](docs/SPEC.md).
 
-The application must:
-- Display automatically refreshed player counts and Steam reviews.
-- Continuously store source observations for later analysis.
-- Produce historical aggregates and charts.
-- Export data directly from the interface.
-- Run locally on Windows without Docker.
-- Also run as a Linux Docker container, deployable through Docker Compose and Portainer.
+- **One process:** FastAPI + background collector threads. Collection does not depend on the browser.
+  Closing the dashboard does not stop it, and extra tabs do not start extra collectors. An OS-level lock
+  file lets only one collector write to a data directory.
+- **Storage:** SQLite (WAL mode) with versioned migrations. Raw data is kept forever, and aggregates can be rebuilt from it.
+- **No external services** except Steam (and Anthropic, if you enable the AI feature). Chart assets
+  (uPlot 1.6.32) are bundled in `wwp_radar/static/vendor`.
 
-Exclude sales, revenue, wishlists, and financial Steamworks integrations.
+---
 
-Default configuration:
-- Game: Wild West Pioneers.
-- Steam App ID: `3222640`.
-- Display timezone: `Europe/Warsaw`.
-- CCU polling: every 60 seconds.
-- Review polling: every 120 seconds.
-- Launch timestamp: user-configurable; do not invent the launch hour.
+## 1. Quick start on Windows
 
-Keep the architecture simple and suitable for one monitored game, while allowing the App ID to be changed.
+Requirements: Windows 10/11, **Python 3.10–3.13** from <https://www.python.org/downloads/windows/>
+(tick *“Add python.exe to PATH”* and *“py launcher”*). Tested with Python 3.11.
 
-## 2. Suggested architecture
+```bat
+setup.bat      :: creates .venv, installs the locked dependencies, creates .env from .env.example
+start.bat      :: starts dashboard + collector
+```
 
-Prefer:
-- Python with FastAPI.
-- SQLite for persistent storage.
-- A lightweight web interface with locally bundled chart assets.
-- One application instance and one collection scheduler.
+Open <http://127.0.0.1:8765>. The server binds to **localhost only** by default.
 
-Avoid unnecessary infrastructure such as Redis or a separate database server.
+- **Data directory:** `%LOCALAPPDATA%\WWPLaunchRadar` (`radar.sqlite3`, session secret, temp exports).
+  It is outside the repository, so it survives upgrades and re-cloning. Override it with `WWP_DATA_DIR`.
+- **Collection only runs while `start.bat` is running and the computer is awake.** Sleep, hibernation or
+  closing the window create gaps. Gaps show up in the charts, in aggregate coverage and in export
+  metadata. Nothing is backfilled for CCU, because Steam has no historical CCU endpoint. After downtime,
+  review collection catches up on its own.
+  For launch day, turn off sleep in *Settings → System → Power*.
+- Launch time: set `WWP_LAUNCH_AT` to a date **and** time, e.g. `2026-10-15 18:00` (read in `WWP_DISPLAY_TZ`)
+  or `2026-10-15T18:00:00+02:00`, or use
+  **Ustawienia** in the dashboard. It is intentionally empty by default.
+- Demo: `demo.bat` writes synthetic data to a **separate** `demo.sqlite3` and starts the dashboard with a
+  purple *DANE DEMONSTRACYJNE* banner and no collector. Real data is never touched.
 
-Collection must run independently of browser sessions. Closing the dashboard must not stop collection. Multiple open tabs must not create additional collectors.
+### Optional: start automatically at logon (Task Scheduler)
 
-Use a supported dependency set, lock dependencies, and verify current official API documentation during implementation.
+PowerShell, as your normal user:
 
-## 3. Steam data collection
+```powershell
+$dir = "C:\path\to\WWP_Launch_Radar"
+$action   = New-ScheduledTaskAction -Execute "$dir\start.bat" -WorkingDirectory $dir
+$trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+            -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName "WWP Launch Radar" -Action $action -Trigger $trigger -Settings $settings
+# remove: Unregister-ScheduledTask -TaskName "WWP Launch Radar" -Confirm:$false
+```
 
-Use official Steam interfaces where available:
+### Other commands
 
-- Current players:
-  `https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=3222640`
-- Reviews:
-  `https://store.steampowered.com/appreviews/3222640?json=1`
+```bat
+.venv\Scripts\python -m wwp_radar backup D:\radar-backup.sqlite3   :: consistent online backup
+.venv\Scripts\pip install -r requirements-dev.txt && .venv\Scripts\python -m pytest   :: tests
+```
 
-Fetch upstream data through the backend.
+---
 
-Implement:
-- Request timeouts, bounded retries, exponential backoff, and rate-limit handling.
-- Clear distinction between a successful zero result and a failed request.
-- Per-source health, last successful fetch, and last error.
-- Persistent collection checkpoints and restart recovery.
-- Bounded request concurrency.
+## 2. Configuration
 
-Do not fabricate data when Steam is unavailable.
+All settings are environment variables (or `.env`). See [`.env.example`](.env.example). The most important ones:
 
-### Current players
+| Variable | Default | Meaning |
+|---|---|---|
+| `WWP_APP_ID` / `WWP_GAME_NAME` | `3222640` / Wild West Pioneers | Initial game (can be switched in the UI) |
+| `WWP_LAUNCH_AT` | empty | Launch date and time (local display time, or with UTC offset). Applied once; later changes go through *Ustawienia* |
+| `WWP_DISPLAY_TZ` | `Europe/Warsaw` | Display timezone (storage is always UTC) |
+| `WWP_CCU_INTERVAL` / `WWP_REVIEW_INTERVAL` | 60 / 120 s | Poll intervals |
+| `WWP_HOST` / `WWP_PORT` | `127.0.0.1` / `8765` | Bind address |
+| `WWP_DASHBOARD_PASSWORD` | empty | Enables login. **Required** for any non-localhost bind |
+| `WWP_TRUST_PROXY_AUTH` | false | Allow a non-localhost bind without a password when an authenticating reverse proxy protects the app |
+| `WWP_DATA_DIR` | `%LOCALAPPDATA%\WWPLaunchRadar`, `/data` in Docker | Database location |
+| `WWP_AI_ENABLED`, `ANTHROPIC_API_KEY`, `WWP_AI_MODEL` | off, –, `claude-opus-5` | Optional AI analysis |
 
-Store every successful observation with its UTC collection timestamp and player count.
+**Changing the App ID** (in *Ustawienia*) creates or selects a separate game record. All data is keyed
+by game, so earlier histories, checkpoints and annotations stay intact and separate. Exports have a game selector.
 
-Record collection failures separately. A failed request must never become a zero-player observation.
+---
 
-Historical player counts before monitoring started are unavailable from this endpoint. Label peaks as “highest observed since monitoring started,” not Steam all-time peaks.
+## 3. Data collection
 
-Do not infer unique players, retention, or units sold from CCU.
+### Current players (CCU)
+`GET https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=…`, every 60 s,
+aligned to a fixed schedule (no drift, and no burst of catch-up calls after sleep).
+
+- A successful response (`result: 1`) is stored in `ccu_observations` with the UTC collection time. A real `0` is stored as `0`.
+- Every attempt is logged in `collection_runs` with status `ok`, `error` or `unavailable`. **A failed request is never stored as an observation.**
+- `unavailable`: for apps without player data (for example before release), Steam answers **HTTP 404 with
+  `{"response":{"result":42}}`**. Verified on 2026-09-25 for App 3222640. This counts as "no data", not zero players.
+- Peaks are labelled *“najwyższe zaobserwowane od rozpoczęcia monitoringu”* (highest observed since monitoring started). They are not Steam all-time peaks.
+  CCU is not used to infer unique players, retention or units sold.
 
 ### Reviews
+`GET https://store.steampowered.com/appreviews/<appid>?json=1` with
+`language=all&purchase_type=all&review_type=all&filter_offtopic_activity=0&num_per_page=100` and cursor pagination.
 
-On initial setup, import available review history using cursor pagination, with visible progress. Continue collecting CCU during this import.
+Two resumable **walkers** keep the review records complete:
 
-Fetch all languages and all purchase types for review analysis. Preserve fields that allow Steam purchases and other acquisition types to be filtered separately.
+| Walker | Steam `filter` | Purpose |
+|---|---|---|
+| `recent` | `recent` (newest created first) | The first run is the **historical import**, which walks to the end of the list. Later runs fetch new reviews until they pass the previous high-water mark minus 1 h overlap, following **as many pages as needed** after downtime. |
+| `updated` | `updated` (newest updated first) | Starts after the import, from the import start time. It reconciles edits to older reviews that `recent` would not see again. |
 
-Handle both newly created reviews and edits:
-- Incrementally fetch recently created reviews.
-- Separately reconcile recently updated reviews.
-- Deduplicate by Steam recommendation ID.
-- Preserve previous versions when relevant content or sentiment changes.
-- Persist review creation time, update time, first-seen time, and observation time separately.
-- Ensure polling catches up through all required pages after downtime; do not fetch only the first page.
-- Do not treat a review missing from an incremental result as deleted.
+- The cursor is checkpointed after **every page** (`checkpoints` table). A restart or crash resumes from the
+  saved cursor. The watermark only moves forward once a walk completes, so no pages are skipped. If a cursor fails 3 times
+  (it may have expired), the walk restarts from the top. Deduplication makes that safe.
+- Import progress (`reviews_seen / expected_total` from Steam's `query_summary`) appears as a status pill. CCU keeps collecting in its own thread during the import.
+- Reviews are deduplicated by `recommendationid`. Each record keeps `timestamp_created`, `timestamp_updated`,
+  `first_seen_at` (discovery by the monitor) and `last_seen_at` separately.
+- **Versions:** a change in text, recommendation, language, playtime at review, purchase/free/EA flags or
+  developer response adds an immutable row to `review_versions` (with the raw Steam JSON and
+  `observed_at`). Volatile counters such as votes and playtime_forever are updated in place.
+- A review missing from an incremental result is **never treated as deleted**.
+- **Summary snapshots** (`review_summary_snapshots`): every review poll stores Steam's `query_summary` for two
+  explicitly defined populations, each with its exact query parameters. They are never mixed:
+  - `all_all`: all languages, all acquisition types (Steam's default off-topic filter)
+  - `all_steam`: all languages, Steam purchases only
 
-Store relevant source fields including:
-- Review ID and text.
-- Positive/negative recommendation.
-- Language.
-- Playtime at review, when available.
-- Steam purchase and received-for-free flags.
-- Early Access flag.
-- Developer response, when available.
-- Source timestamps.
+  Stored review records also carry `steam_purchase` / `received_for_free`, so the feed and exports can
+  split Steam purchases from other acquisition types (keys, gifts, free).
 
-Store aggregate review-summary snapshots separately with their exact query/filter settings. Never silently mix summary counts from different review populations.
+### Reliability
+Timeouts (20 s), up to 4 retries with exponential backoff and jitter, `Retry-After` handling for 429/503,
+at most 2 concurrent Steam requests, and at least 1 s between requests. Per-source health (last success, last
+error, consecutive failures) appears in the dashboard (*Źródła danych*, the data sources panel) and in `/api/status`.
 
-## 4. Persistence and aggregates
+---
 
-Persistence is a core requirement, not an optional feature.
+## 4. Storage, aggregates and their semantics
 
-Retain raw observations and review versions indefinitely by default. Never replace raw data with aggregates.
+Timestamps are stored as UTC Unix epoch seconds. Local time is used only for display, for daily buckets and for the `*_local`
+export columns. SQLite runs with WAL, `synchronous=NORMAL`, `busy_timeout`, foreign keys and indexes.
+Writes happen inside short `BEGIN IMMEDIATE` transactions. The schema is versioned via `PRAGMA user_version`
+(`wwp_radar/db.py`). An app older than the database refuses to start instead of damaging it.
 
-Use a versioned database schema, migrations, indexes, transactions, and appropriate SQLite concurrency settings.
+Aggregates are rebuilt from raw data at startup and refreshed every 60 s. You can also rebuild them from *Ustawienia → Przebuduj agregaty*:
 
-Suggested entities:
-- Monitored games and settings.
-- Collection runs/errors and checkpoints.
-- CCU observations.
-- Review records and immutable versions.
-- Review-summary snapshots.
-- Aggregate buckets.
-- Manual event annotations.
-- Optional AI analysis runs.
+| Aggregate | Definition |
+|---|---|
+| **CCU 5m / 1h** | Buckets aligned to UTC multiples. Europe/Warsaw offsets are whole hours, so 1h buckets equal local clock hours. |
+| **CCU 1d** | Calendar days in `WWP_DISPLAY_TZ`. DST days last 23 h or 25 h. |
+| CCU fields | `min`, `max`, `mean` of successful observations, `samples`, `expected_samples` = monitored seconds in the bucket ÷ poll interval, `coverage` = samples ÷ expected (max 1). Buckets with **no samples still exist**, with NULL values and coverage 0. **Nothing is interpolated.** Charts break the line at gaps (more than 2.5 intervals without a sample). |
+| **New reviews 1h / 1d** | Counted by **Steam creation time** (`timestamp_created`), classified by the review's **current** recommendation. Also split into Steam purchases only. Imported history lands at its real creation time, not as a burst at import time. |
+| **Sentiment changes** | Counted separately, at the edit time (`timestamp_updated`) of a version whose recommendation differs from the previous *observed* version. |
+| **Summary trend 1h / 1d** | The last summary snapshot in each bucket, per population. `positive_pct = positive / (positive + negative)`. |
 
-Store timestamps in UTC and convert only for display. Exports must include UTC timestamps.
+Review counts in the dashboard are labelled as observed/imported data. Status pills and export metadata show when the import is incomplete.
 
-Produce rebuildable aggregates for:
-- 5-minute, hourly, and daily CCU buckets: minimum, maximum, mean, sample count, and coverage.
-- Newly created positive and negative reviews by hour/day.
-- Review sentiment changes, tracked separately from new reviews.
-- Review-summary trends over time.
-
-Define aggregation semantics in the README. Label review counts as imported/observed data, and indicate incomplete imports.
-
-Do not interpolate missing CCU intervals as actual observations. Charts must show gaps, and aggregate coverage must reflect missing samples.
-
-Changing App ID must retain existing data and keep histories separated.
+---
 
 ## 5. Dashboard
 
-Create a polished, readable dashboard suitable for a second monitor. Default to a dark theme and Polish UI labels.
+Cards: current CCU (with freshness), highest observed CCU and its time, CCU change over ~15 and ~60 min
+(*niedostępne* (unavailable) unless a sample exists within ±3 min / ±5 min of the reference time), positive/negative counts,
+positive % with sample size and an explicit population selector, reviews created in the last hour, and collection health.
+Three separate statuses: **application/collector**, **Steam source availability** and **historical import completeness**.
 
-Top cards:
-- Current CCU.
-- Highest observed CCU and its timestamp.
-- CCU change over approximately 15 and 60 minutes.
-- Positive and negative review counts.
-- Positive review percentage with sample size and explicit population/filter label.
-- Number of newly created reviews in the last hour.
-- Collection health and data freshness.
+Charts (uPlot, bundled locally): CCU over time (raw ≤ 12 h, then 5-min/hourly/daily mean + max), new positive and negative
+reviews per bucket with sentiment-change markers, and positive % from stored summary snapshots. Annotations appear as dashed lines.
+Time filters: 1 h, 6 h, 24 h, *Od premiery* (since launch, when configured), *Cały okres* (whole period), and a custom range entered in the display timezone.
 
-If there is no sufficiently close historical CCU sample for a comparison, show “unavailable.”
+Review feed: filters for positive/negative, language, Steam purchase vs. other, edited only, and date range, plus text search.
+Each review shows its creation time *and* its discovery time, playtime at review, flags, a link to the original Steam review and the developer response.
+Edited reviews open their version history.
 
-Charts:
-- CCU over time.
-- Positive and negative new reviews per time bucket.
-- Review percentage over time from stored summary snapshots.
+---
 
-Time filters:
-- Last hour.
-- Last 6 hours.
-- Last 24 hours.
-- Since launch, when configured.
-- Entire collection period.
-- Custom date range.
+## 6. Exports (*Eksportuj dane*)
 
-Clearly distinguish event time from first discovery time. Imported historical reviews must not appear as a burst of newly posted reviews at import time.
+All exports come from stored data. Steam is never queried again. They work while collection continues. Ranges are half-open `[from, to)` in UTC,
+and the dialog accepts times in the display timezone.
 
-Review feed:
-- Positive/negative filter.
-- Language filter.
-- Steam purchase/other filter.
-- Text search.
-- Creation time and playtime at review.
-- Original Steam review link.
-- Indication of edited reviews and access to version history.
+| # | Dataset | Format | Date filter applies to |
+|---|---|---|---|
+| 1 | Raw CCU observations | CSV | observation time |
+| 2 | CCU aggregates (5m/1h/1d) | CSV | bucket start |
+| 3 | Current review records | CSV, JSON | **review creation time** (`timestamp_created`) |
+| 4 | Review version history (raw Steam JSON included) | JSON | **version observation time** (`observed_at`) |
+| 5 | Review-summary snapshots (with population + query params) | CSV | observation time |
+| 6 | Review aggregates | CSV | bucket start |
+| 7 | Annotations | CSV | event time |
+| 8 | **Analysis ZIP**: all of the above + `metadata.json` | ZIP | per dataset, as above. One consistent read snapshot |
+| 9 | **SQLite backup** | .sqlite3 | whole database, via the SQLite online backup API |
 
-Manual annotations:
-- Add, edit, and delete timestamped events such as launch, hotfix, stream, and marketing publication.
-- Display annotations on charts.
-- Persist and export them.
+CSV files are UTF-8 with BOM, CRLF line endings, and RFC 4180 quoting (multi-line review text is safe). Pick
+the semicolon separator for Polish Excel. Text cells starting with `= + - @ Tab CR` get a leading `'` to block
+spreadsheet formula injection. JSON keeps the original text. `metadata.json` holds the App ID, game, export time,
+range and timezone conventions, dataset/filter definitions, app and schema version, monitoring start, CCU gaps,
+import completeness, metric definitions and limitations. Credentials never appear in exports or logs.
 
-Show separate statuses for application health, Steam source availability, and historical-import completeness.
-
-## 6. Export through the interface
-
-Provide an obvious “Export data” action with date-range and game selection.
-
-Support:
-1. Raw CCU observations as CSV.
-2. CCU aggregates as CSV.
-3. Current review records as CSV and JSON.
-4. Review version history as JSON.
-5. Review-summary snapshots as CSV.
-6. Review aggregates as CSV.
-7. Manual annotations as CSV.
-8. A complete analysis ZIP containing these datasets and metadata.
-9. A consistent SQLite backup download.
-
-ZIP metadata must include:
-- App ID and game name.
-- Export timestamp.
-- Selected range and timezone conventions.
-- Dataset/filter definitions.
-- Schema/application version.
-- Collection start, gaps, and import completeness.
-- Definitions and limitations of metrics.
-
-Specify which timestamp controls each date-filtered export, especially review creation versus version observation time.
-
-Exports must work while collection continues. Use SQLite’s backup mechanism for database backups rather than naively copying an active database file.
-
-Use Windows/Excel-friendly UTF-8 CSV encoding and proper multiline quoting. Protect spreadsheet exports against formula injection from user-generated review text; preserve original text in JSON.
-
-Generate exports from stored data, not by fetching Steam again.
+---
 
 ## 7. Optional AI review analysis
 
-Implement as an optional, separately configurable feature. The application must remain fully functional without an AI API key.
+Off by default. The app runs fully without an API key. To enable it, set `WWP_AI_ENABLED=true` and `ANTHROPIC_API_KEY=…`
+(and optionally `WWP_AI_MODEL`, default `claude-opus-5`).
 
-When enabled:
-- Process new or changed reviews approximately every 10 minutes.
-- Group recurring issues such as crashes, saves, performance, tutorial, UI, and balance.
-- Include positive themes as well.
-- Show unique review counts, supporting review links, analysis timeframe, and a short Polish summary.
-- Clearly label AI-generated conclusions.
-- Persist analysis history, model identity, and supporting review IDs.
-- Avoid reprocessing unchanged reviews unnecessarily.
-- Provide a manual “Analyze now” action and bounded batch sizes.
+- Every 10 min (or when you click *Analizuj teraz*, "analyze now"), at most 3 batches of up to `WWP_AI_BATCH_SIZE` (120) reviews
+  whose **current content** has not yet been analysed are sent in one structured-output request (`messages.parse`) with **no tools**.
+- The model assigns reviews to a **fixed taxonomy** (crashes, saves, performance, other bugs, tutorial, UI,
+  balance, content, price, localization, plus positive themes) and writes short Polish summaries.
+- **The application computes all numbers.** Review IDs that are not in the batch are dropped. The dashboard shows unique review counts per
+  theme, links to supporting reviews, the analysed time window and the model name, all under a *generowane przez AI* (AI-generated) label.
+  The prompt describes findings as player reports, not confirmed bugs.
+- Review text goes in as JSON data inside delimiters, and the system prompt says to never follow instructions found in it.
+- Runs, model, token usage and supporting review IDs are stored (`ai_runs`, `ai_review_assignments`).
+  Unchanged reviews are not reprocessed. Edited reviews are queued again. Failed or refused runs leave reviews pending.
+- The API key stays in the backend. It is redacted from stored error messages and never exported.
 
-Treat review text as untrusted input, never as instructions. Do not give the analysis model tools or operational permissions.
+---
 
-Compute numeric metrics in application code. AI must not invent statistics or turn unverified complaints into confirmed bugs.
+## 8. Docker and Portainer
 
-Keep credentials on the backend and out of logs and exports.
+The image is `python:3.12-slim` and runs as a non-root user. Data lives in a volume at `/data`. There is a `HEALTHCHECK` on `/healthz`,
+`restart: unless-stopped`, and graceful shutdown on SIGTERM (`stop_grace_period: 30s`).
+Inside the container the app listens on `0.0.0.0`, so **it refuses to start without `WWP_DASHBOARD_PASSWORD`**
+unless `WWP_TRUST_PROXY_AUTH=true` is set, which is only for when an authenticating reverse proxy
+(e.g. Authelia, oauth2-proxy, Traefik/Caddy basic auth) protects it. The password protects the dashboard, the API,
+exports and settings. Only `/healthz` and the login page are public. For access beyond your LAN, add
+HTTPS through a reverse proxy.
 
-## 8. Windows execution
+### Compose (on the Docker host)
+```bash
+git clone <repo> && cd WWP_Launch_Radar
+export WWP_DASHBOARD_PASSWORD='change-me'
+docker compose up -d --build            # builds and tags wwp-launch-radar:1.0.0
+# LAN access: WWP_PUBLISH_ADDR=0.0.0.0 docker compose up -d
+```
 
-Provide:
-- `setup.bat` to create a virtual environment and install dependencies.
-- `start.bat` to start the application and collector.
-- `.env.example`.
-- Clear README instructions for supported Python installation and startup.
+### Portainer
+`deploy/portainer-stack.yml` references the **pre-built** image `wwp-launch-radar:1.0.0` and needs no build
+context. First make the image available to the Docker host that Portainer manages, using one of these:
 
-Bind to localhost by default.
+1. **Build on that host:** `docker build -t wwp-launch-radar:1.0.0 .` (in a checkout on the host).
+2. **Copy the image:** on the build machine run
+   `docker build -t wwp-launch-radar:1.0.0 . && docker save wwp-launch-radar:1.0.0 -o wwp-launch-radar-1.0.0.tar`,
+   then on the host run `docker load -i wwp-launch-radar-1.0.0.tar` (or use Portainer → Images → Import).
+   Build for the host's architecture, e.g. `docker buildx build --platform linux/amd64 -t wwp-launch-radar:1.0.0 --load .`
+3. **Registry:** tag as `registry.example.com/wwp-launch-radar:1.0.0`, push, and set `WWP_IMAGE` in the stack.
 
-Use a predictable writable data directory that survives upgrades and restarts.
+Then go to Portainer → *Stacks* → *Add stack* → paste the file. Set `WWP_DASHBOARD_PASSWORD` (and optionally
+`WWP_LAUNCH_AT`, `WWP_PUBLISH_PORT`, `ANTHROPIC_API_KEY`) under *Environment variables* and deploy. The named volume
+`wwp-data` holds the database, settings, checkpoints and AI history, and survives container recreation and image upgrades.
 
-Explain that collection requires the process to remain running and the computer to remain awake. Include an optional Windows Task Scheduler startup example.
+### Moving between Windows and Docker
+Always move a **consistent backup**, never a live `radar.sqlite3` (its `-wal` file may hold committed data).
 
-## 9. Docker and Portainer
+- **Windows → Docker:** download *Eksport → Kopia zapasowa bazy SQLite* (or run `python -m wwp_radar backup file.sqlite3`),
+  stop the container, and copy it in as `radar.sqlite3`:
+  ```bash
+  docker compose stop
+  docker run --rm -v wwp-launch-radar_wwp-data:/data -v "$PWD":/in alpine \
+    sh -c 'rm -f /data/radar.sqlite3-wal /data/radar.sqlite3-shm && cp /in/backup.sqlite3 /data/radar.sqlite3 && chown 10001:10001 /data/radar.sqlite3'
+  docker compose start
+  ```
+- **Docker → Windows:** download the backup from the dashboard, stop `start.bat`, delete any `radar.sqlite3-wal/-shm`
+  in `%LOCALAPPDATA%\WWPLaunchRadar`, save the backup there as `radar.sqlite3`, and start again.
 
-Provide:
-- Dockerfile.
-- `.dockerignore`.
-- Docker Compose configuration.
-- A Portainer-compatible stack example.
-- Health check.
-- Persistent volume mounted at `/data`.
-- Configurable published port.
-- `restart: unless-stopped`.
-- Graceful shutdown.
+Only run one collector for a game at a time. Otherwise both instances record duplicate, interleaved data.
 
-Ensure database, settings, checkpoints, and analysis history survive container recreation.
+---
 
-Explain how to build/tag the image and make it available to the Docker host used by Portainer. The stack must not depend on an image that has not been built or an inaccessible local build context.
+## 9. Project layout
 
-Document migration between Windows and Docker using a consistent database backup.
+```
+wwp_radar/
+  config.py      settings (.env / environment), exposure guard
+  db.py          SQLite connection, migrations, online backup
+  steam.py       Steam HTTP client (timeouts, retries, backoff, rate limits, concurrency)
+  store.py       data access, review dedup/versioning, health, checkpoints, annotations
+  collector.py   collector threads, lock file, resumable review walkers, summaries
+  aggregates.py  rebuildable CCU/review/summary aggregates
+  exports.py     CSV/JSON/ZIP exports + metadata
+  ai.py          optional Claude analysis
+  app.py         FastAPI app, API, auth middleware
+  static/        dashboard (HTML/CSS/JS, bundled uPlot)
+tests/           deterministic tests with a fake Steam backend (httpx.MockTransport)
+deploy/          Portainer stack
+```
 
-Support optional password protection for LAN/server access. A deployment exposing the dashboard beyond localhost must require authentication or a documented authenticated reverse proxy. Protect exports and configuration routes too.
+Dependencies are pinned in `requirements.txt` (direct deps in `requirements.in`). Test tools are in `requirements-dev.txt`.
 
-## 10. Verification and delivery
+---
 
-Add meaningful tests covering:
-- Failed CCU requests never stored as zero.
-- Review deduplication and version history.
-- Pagination and recovery after downtime.
-- Correct aggregate buckets, gaps, and timezone handling.
-- Export validity and date-filter semantics.
-- Persistence across restarts.
-- A usable, consistent database backup.
+## 10. Validation and known limitations
 
-Use deterministic fixtures for automated tests. Keep demo data explicitly separate from real data.
+**Automated tests** (`pytest`, 33 tests, deterministic, no network) cover: failed, network-error and HTTP-404
+CCU responses never stored as zero, while a real `0` is stored; review deduplication, immutable versions and sentiment-change
+flags; import resume from a checkpointed cursor after restart; multi-page catch-up after downtime;
+cursor retention on transient errors; reconciliation of edits to old reviews; no deletion on missing reviews;
+CCU bucket gaps and coverage, Warsaw hourly alignment and 23/25 h DST days; review aggregates by creation time
+with no import burst; CSV BOM, quoting, formula injection, delimiters; date-filter semantics (creation vs. observation
+time); ZIP contents and metadata; persistence and idempotent migrations across restarts; consistent backup under
+concurrent writes; App ID switching keeping data separate; API endpoints; auth enforcement; AI validation, redaction and
+no reprocessing (with a stub client).
 
-Perform a live API smoke test when network access permits. Report blocked or untested paths honestly.
+**Live smoke test (2026-09-25):** the collector ran against real Steam. For App 3222640 (not yet released) CCU comes back
+as *unavailable* (HTTP 404, `result: 42`), so nothing is stored. The review import completed with 0 reviews, and summaries were
+stored. Real cursor pagination and summaries were checked on a released game (Hades, 1145360): 3 pages, 300 reviews,
+17 languages.
 
-Deliver the implemented repository, setup instructions, Windows startup scripts, Docker/Portainer configuration, and concise notes on validation and known limitations.
+**Not verified here:** building and running the Docker image (Docker Desktop was not running on the development machine;
+both compose files pass `docker compose config`), and a live AI call (no API key was used; tests use a stub).
 
-Start with reliable collection and persistence, then the dashboard and exports, then optional AI analysis. Do not stop after scaffolding.
+Limitations:
+- CCU before monitoring started is not available from Steam. CCU is not tracked while the process is stopped or the PC sleeps.
+- A sentiment change made before the monitor first saw a review cannot be known.
+- Steam's review API may omit some reviews (e.g. removed or hidden ones), and its `query_summary` counts can differ
+  from the number of retrievable records. Both are stored and labelled separately.
+- `filter=updated` reconciliation relies on Steam updating `timestamp_updated` on edits. Deleted reviews are not detected.
+- One monitored game at a time (history for several games is kept). The app runs as a single process (one uvicorn worker).

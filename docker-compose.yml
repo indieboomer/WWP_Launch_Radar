@@ -1,0 +1,32 @@
+# Build and run on the Docker host:   docker compose up -d --build
+# The built image is tagged wwp-launch-radar:1.0.0 (the tag used by deploy/portainer-stack.yml).
+name: wwp-launch-radar   # volume is created as wwp-launch-radar_wwp-data
+services:
+  wwp-launch-radar:
+    build: .
+    image: wwp-launch-radar:1.0.0
+    container_name: wwp-launch-radar
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      # Published on the host's localhost by default. Set WWP_PUBLISH_ADDR=0.0.0.0 for LAN access.
+      - "${WWP_PUBLISH_ADDR:-127.0.0.1}:${WWP_PUBLISH_PORT:-8765}:8765"
+    environment:
+      WWP_APP_ID: "${WWP_APP_ID:-3222640}"
+      WWP_GAME_NAME: "${WWP_GAME_NAME:-Wild West Pioneers}"
+      WWP_LAUNCH_AT: "${WWP_LAUNCH_AT:-}"
+      WWP_DISPLAY_TZ: "${WWP_DISPLAY_TZ:-Europe/Warsaw}"
+      WWP_CCU_INTERVAL: "${WWP_CCU_INTERVAL:-60}"
+      WWP_REVIEW_INTERVAL: "${WWP_REVIEW_INTERVAL:-120}"
+      # Inside the container the app listens on 0.0.0.0, so authentication is mandatory:
+      # a password, or WWP_TRUST_PROXY_AUTH=true behind an authenticating reverse proxy.
+      WWP_DASHBOARD_PASSWORD: "${WWP_DASHBOARD_PASSWORD:-}"
+      WWP_TRUST_PROXY_AUTH: "${WWP_TRUST_PROXY_AUTH:-false}"
+      WWP_AI_ENABLED: "${WWP_AI_ENABLED:-false}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      WWP_AI_MODEL: "${WWP_AI_MODEL:-claude-opus-5}"
+    volumes:
+      - wwp-data:/data
+
+volumes:
+  wwp-data:

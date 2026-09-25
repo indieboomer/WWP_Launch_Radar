@@ -1,0 +1,8 @@
+# Direct dependencies (human-edited). The locked set is requirements.txt.
+fastapi
+uvicorn
+httpx
+tzdata
+python-multipart
+# Optional AI review analysis; the app runs without an API key.
+anthropic

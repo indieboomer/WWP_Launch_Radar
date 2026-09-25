@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="pl" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WWP Launch Radar - logowanie</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="login-wrap">
+  <form class="panel login" method="post" action="/login">
+    <h1>WWP Launch Radar</h1>
+    <label class="muted" for="password">Hasło do panelu</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" autofocus required>
+    <div class="err">{{ERROR}}</div>
+    <button class="btn primary" type="submit">Zaloguj</button>
+  </form>
+</div>
+</body>
+</html>

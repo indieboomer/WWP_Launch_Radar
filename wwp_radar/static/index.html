@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="pl" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WWP Launch Radar</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/vendor/uPlot.min.css">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div id="demo-banner" class="demo-banner" hidden>DANE DEMONSTRACYJNE - osobna baza demo.sqlite3, nie są to rzeczywiste dane ze Steam</div>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◎</span>
+    <div>
+      <h1>WWP Launch Radar</h1>
+      <div class="sub" id="game-label">…</div>
+    </div>
+  </div>
+  <div class="statuses" id="statuses">
+    <span class="pill" id="st-app" title="Stan aplikacji i kolektora">Aplikacja: …</span>
+    <span class="pill" id="st-steam" title="Dostępność źródeł Steam">Steam: …</span>
+    <span class="pill" id="st-import" title="Kompletność importu historii recenzji">Import: …</span>
+  </div>
+  <div class="actions">
+    <button class="btn primary" id="btn-export">⤓ Eksportuj dane</button>
+    <button class="btn" id="btn-settings">Ustawienia</button>
+    <button class="btn ghost" id="btn-theme" title="Przełącz motyw">◐</button>
+    <form method="post" action="/logout" id="logout-form" hidden><button class="btn ghost">Wyloguj</button></form>
+  </div>
+</header>
+
+<main>
+  <section class="cards" id="cards">
+    <article class="card">
+      <h3>Aktualne CCU</h3>
+      <div class="big" id="c-ccu">–</div>
+      <div class="meta" id="c-ccu-meta"></div>
+    </article>
+    <article class="card">
+      <h3>Najwyższe zaobserwowane CCU</h3>
+      <div class="big" id="c-peak">–</div>
+      <div class="meta" id="c-peak-meta">od rozpoczęcia monitoringu (nie rekord all-time Steam)</div>
+    </article>
+    <article class="card">
+      <h3>Zmiana CCU ~15 min</h3>
+      <div class="big" id="c-d15">–</div>
+      <div class="meta" id="c-d15-meta"></div>
+    </article>
+    <article class="card">
+      <h3>Zmiana CCU ~60 min</h3>
+      <div class="big" id="c-d60">–</div>
+      <div class="meta" id="c-d60-meta"></div>
+    </article>
+    <article class="card">
+      <h3>Recenzje pozytywne / negatywne</h3>
+      <div class="big"><span class="pos" id="c-pos">–</span> <span class="dim">/</span> <span class="neg" id="c-neg">–</span></div>
+      <div class="meta" id="c-posneg-meta"></div>
+    </article>
+    <article class="card">
+      <h3>% pozytywnych
+        <select id="population" class="mini-select" title="Populacja recenzji"></select>
+      </h3>
+      <div class="big" id="c-pct">–</div>
+      <div class="meta" id="c-pct-meta"></div>
+    </article>
+    <article class="card">
+      <h3>Nowe recenzje (ostatnia godzina)</h3>
+      <div class="big" id="c-newhour">–</div>
+      <div class="meta" id="c-newhour-meta">wg czasu utworzenia na Steam</div>
+    </article>
+    <article class="card">
+      <h3>Zbieranie danych</h3>
+      <div class="big small" id="c-health">–</div>
+      <div class="meta" id="c-health-meta"></div>
+    </article>
+  </section>
+
+  <section class="toolbar">
+    <div class="seg" id="range-seg">
+      <button data-range="1h">1 h</button>
+      <button data-range="6h">6 h</button>
+      <button data-range="24h" class="active">24 h</button>
+      <button data-range="launch" id="range-launch">Od premiery</button>
+      <button data-range="all">Cały okres</button>
+      <button data-range="custom">Zakres…</button>
+    </div>
+    <div class="custom-range" id="custom-range" hidden>
+      <label>Od <input type="datetime-local" id="cr-from"></label>
+      <label>Do <input type="datetime-local" id="cr-to"></label>
+      <button class="btn" id="cr-apply">Zastosuj</button>
+    </div>
+    <div class="range-label" id="range-label"></div>
+  </section>
+
+  <section class="charts">
+    <article class="panel">
+      <header><h2>Gracze online (CCU)</h2><span class="hint" id="ccu-res"></span></header>
+      <div class="chart" id="chart-ccu"></div>
+      <p class="foot">Przerwy w linii = brak udanych odczytów (luki nie są interpolowane). Dla dłuższych zakresów: średnia i maksimum w kubełku.</p>
+    </article>
+    <article class="panel">
+      <header><h2>Nowe recenzje w czasie</h2>
+        <label class="inline"><input type="checkbox" id="rv-steam"> tylko zakupy Steam</label>
+        <span class="hint" id="rv-res"></span></header>
+      <div class="chart" id="chart-reviews"></div>
+      <p class="foot">Liczone wg czasu <b>utworzenia</b> recenzji na Steam (nie czasu wykrycia przez monitor), wg bieżącej rekomendacji. Zmiany rekomendacji (edycje) pokazane osobno, wg czasu edycji. Dane zaobserwowane/zaimportowane.</p>
+    </article>
+    <article class="panel">
+      <header><h2>% pozytywnych w czasie</h2><span class="hint" id="pct-label"></span></header>
+      <div class="chart" id="chart-pct"></div>
+      <p class="foot">Z zapisanych migawek podsumowania Steam dla wybranej populacji; czas = moment obserwacji migawki.</p>
+    </article>
+  </section>
+
+  <section class="lower">
+    <article class="panel feed">
+      <header><h2>Recenzje</h2><span class="hint" id="feed-count"></span></header>
+      <div class="filters">
+        <select id="f-sent"><option value="all">Wszystkie</option><option value="positive">Pozytywne</option><option value="negative">Negatywne</option></select>
+        <select id="f-lang"><option value="">Wszystkie języki</option></select>
+        <select id="f-purchase"><option value="all">Każde pozyskanie</option><option value="steam">Zakup na Steam</option><option value="other">Inne (klucz, darmowe…)</option></select>
+        <label class="inline"><input type="checkbox" id="f-edited"> tylko edytowane</label>
+        <label class="inline"><input type="checkbox" id="f-range"> w wybranym zakresie</label>
+        <input type="search" id="f-q" placeholder="Szukaj w treści…">
+      </div>
+      <div id="feed-list" class="feed-list"></div>
+      <button class="btn wide" id="feed-more" hidden>Pokaż więcej</button>
+    </article>
+
+    <aside class="side">
+      <article class="panel">
+        <header><h2>Zdarzenia (adnotacje)</h2></header>
+        <form id="ann-form" class="ann-form">
+          <input type="hidden" id="ann-id">
+          <div class="row">
+            <input type="datetime-local" id="ann-at" required>
+            <select id="ann-kind">
+              <option value="launch">Premiera</option><option value="hotfix">Hotfix</option><option value="patch">Patch</option>
+              <option value="stream">Stream</option><option value="marketing">Marketing</option><option value="other">Inne</option>
+            </select>
+          </div>
+          <input type="text" id="ann-title" maxlength="200" placeholder="Tytuł" required>
+          <input type="text" id="ann-desc" maxlength="2000" placeholder="Opis (opcjonalnie)">
+          <div class="row">
+            <button class="btn primary" type="submit" id="ann-submit">Dodaj</button>
+            <button class="btn ghost" type="button" id="ann-cancel" hidden>Anuluj</button>
+          </div>
+        </form>
+        <ul id="ann-list" class="ann-list"></ul>
+      </article>
+
+      <article class="panel" id="ai-panel">
+        <header><h2>Analiza AI <span class="ai-badge">generowane przez AI</span></h2>
+          <button class="btn" id="ai-run" hidden>Analizuj teraz</button></header>
+        <div id="ai-body" class="ai-body"></div>
+      </article>
+
+      <article class="panel">
+        <header><h2>Źródła danych</h2></header>
+        <table class="health" id="health-table"></table>
+      </article>
+    </aside>
+  </section>
+</main>
+
+<dialog id="dlg-export">
+  <form method="dialog" class="dlg">
+    <h2>Eksport danych</h2>
+    <p class="muted">Eksport pochodzi z zapisanych danych (bez ponownego pobierania ze Steam). Znaczniki czasu w UTC; kolumny <code>*_local</code> w strefie <span class="tzname"></span>.</p>
+    <div class="grid2">
+      <label>Gra <select id="ex-game"></select></label>
+      <label>Separator CSV
+        <select id="ex-delim"><option value="comma">przecinek (,)</option><option value="semicolon">średnik (;) - Excel PL</option></select></label>
+      <label>Od <input type="datetime-local" id="ex-from"></label>
+      <label>Do <input type="datetime-local" id="ex-to"></label>
+    </div>
+    <div class="row"><button type="button" class="btn ghost" id="ex-use-range">Użyj bieżącego zakresu</button>
+      <button type="button" class="btn ghost" id="ex-clear">Cały okres</button></div>
+    <table class="ex-table">
+      <tr><td>Surowe obserwacje CCU</td><td class="muted">filtr: czas obserwacji</td><td><a data-ds="ccu_raw">CSV</a></td></tr>
+      <tr><td>Agregaty CCU (5m/1h/1d)</td><td class="muted">filtr: początek kubełka</td><td><a data-ds="ccu_aggregates">CSV</a></td></tr>
+      <tr><td>Recenzje (stan bieżący)</td><td class="muted">filtr: czas utworzenia recenzji</td><td><a data-ds="reviews">CSV</a> <a data-ds="reviews" data-fmt="json">JSON</a></td></tr>
+      <tr><td>Historia wersji recenzji</td><td class="muted">filtr: czas zaobserwowania wersji</td><td><a data-ds="review_versions">JSON</a></td></tr>
+      <tr><td>Migawki podsumowania recenzji</td><td class="muted">filtr: czas obserwacji</td><td><a data-ds="review_summaries">CSV</a></td></tr>
+      <tr><td>Agregaty recenzji</td><td class="muted">filtr: początek kubełka</td><td><a data-ds="review_aggregates">CSV</a></td></tr>
+      <tr><td>Adnotacje</td><td class="muted">filtr: czas zdarzenia</td><td><a data-ds="annotations">CSV</a></td></tr>
+      <tr class="hl"><td><b>Pełna paczka analityczna</b></td><td class="muted">wszystko + metadata.json</td><td><a data-ds="zip">ZIP</a></td></tr>
+      <tr><td>Kopia zapasowa bazy SQLite</td><td class="muted">cała baza, spójna kopia (backup API)</td><td><a data-ds="backup">SQLite</a></td></tr>
+    </table>
+    <div class="row end"><button class="btn">Zamknij</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-settings">
+  <form class="dlg" id="settings-form">
+    <h2>Ustawienia</h2>
+    <label>Czas premiery (strefa <span class="tzname"></span>)
+      <input type="datetime-local" id="set-launch"></label>
+    <p class="muted">Pozostaw puste, jeśli godzina premiery nie jest jeszcze znana.</p>
+    <fieldset>
+      <legend>Monitorowana gra</legend>
+      <div class="grid2">
+        <label>Steam App ID <input type="number" id="set-appid" min="1"></label>
+        <label>Nazwa <input type="text" id="set-name" maxlength="200"></label>
+      </div>
+      <p class="muted">Zmiana App ID przełącza monitoring na inną grę. Dane poprzedniej gry pozostają w bazie, a historie są rozdzielone.</p>
+    </fieldset>
+    <div class="row"><button type="button" class="btn ghost" id="set-rebuild">Przebuduj agregaty</button></div>
+    <div class="row end">
+      <button type="button" class="btn ghost" id="set-cancel">Anuluj</button>
+      <button type="submit" class="btn primary">Zapisz</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-versions">
+  <form method="dialog" class="dlg wide">
+    <h2>Historia wersji recenzji</h2>
+    <div id="versions-body"></div>
+    <div class="row end"><button class="btn">Zamknij</button></div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/static/vendor/uPlot.iife.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
